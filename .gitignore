@@ -1,0 +1,7 @@
+target/
+dist/
+projects.json
+projects.json.bak
+projects.json.tmp
+*.sha256
+*.log

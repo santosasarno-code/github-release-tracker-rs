@@ -1,0 +1,43 @@
+name: Build Windows exe
+
+# Manual only: Actions tab -> "Build Windows exe" -> Run workflow.
+# It only builds and uploads an artifact; it never touches your Releases.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+      - name: Test the logic
+        run: cargo test --lib --locked
+      - name: Build
+        run: cargo build --release --locked
+      - name: Collect, hash and check
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/github-release-tracker.exe dist/GitHubReleaseTracker.exe
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          & tools/release-notes.ps1 -Version $v -Exe dist/GitHubReleaseTracker.exe -Out "dist/release-notes-v$v.md"
+          $size = (Get-Item dist/GitHubReleaseTracker.exe).Length
+          Write-Host "Version $v, exe size $size bytes"
+          if ($size -lt 100000) { throw "exe is suspiciously small" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GitHubReleaseTracker-windows
+          path: |
+            dist/GitHubReleaseTracker.exe
+            dist/GitHubReleaseTracker.exe.sha256
+            dist/release-notes-v*.md
+          if-no-files-found: error
