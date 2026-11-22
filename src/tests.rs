@@ -72,14 +72,20 @@ struct MockNet {
     api: RefCell<Vec<(String, Result<Value, GitHubError>)>>,
     calls: RefCell<Vec<String>>,
     rate: Cell<Option<i64>>,
+    urls: RefCell<Vec<(String, Result<Value, GitHubError>)>>,
 }
 
 impl MockNet {
     fn new(feed: Result<String, GitHubError>) -> Self {
-        MockNet { feed, api: RefCell::new(vec![]), calls: RefCell::new(vec![]), rate: Cell::new(None) }
+        MockNet { feed, api: RefCell::new(vec![]), calls: RefCell::new(vec![]), rate: Cell::new(None), urls: RefCell::new(vec![]) }
     }
     fn on(self, prefix: &str, r: Result<Value, GitHubError>) -> Self {
         self.api.borrow_mut().push((prefix.to_string(), r));
+        self
+    }
+    /// Answer for a full URL (other hosts), matched by prefix.
+    fn url(self, prefix: &str, r: Result<Value, GitHubError>) -> Self {
+        self.urls.borrow_mut().push((prefix.to_string(), r));
         self
     }
 }
@@ -97,6 +103,15 @@ impl Net for MockNet {
     fn feed_get(&self, _o: &str, _r: &str) -> Result<String, GitHubError> {
         self.calls.borrow_mut().push("feed".into());
         self.feed.clone()
+    }
+    fn http_json(&self, url: &str) -> Result<Value, GitHubError> {
+        self.calls.borrow_mut().push(url.to_string());
+        for (p, r) in self.urls.borrow().iter() {
+            if url.to_lowercase().starts_with(&p.to_lowercase()) { // real servers match names case-insensitively
+                return r.clone();
+            }
+        }
+        Err(GitHubError::not_found())
     }
     fn rate_remaining(&self) -> Option<i64> {
         self.rate.get()
@@ -311,4 +326,129 @@ fn rename_rules() {
     assert_eq!(apply_rename(&mut p, "repo"), Some("Name reset to repo.".into()));
     assert_eq!(p.custom_name, None);
     assert_eq!(apply_rename(&mut p, ""), None);
+}
+
+
+// ----- other hosts: GitLab, Gitea / Forgejo, self-hosted -----
+fn segs(v: &[&str]) -> Vec<String> {
+    v.iter().map(|x| x.to_string()).collect()
+}
+
+#[test]
+fn parse_project_ref_cases() {
+    let pr = |t: &str| parse_project_ref(t).map(|r| (r.host, r.kind, r.segs));
+    let t = |h: &str, k: Option<&str>, v: &[&str]| Some((h.to_string(), k.map(String::from), segs(v)));
+    assert_eq!(pr("owner/repo"), t("", None, &["owner", "repo"]));
+    assert_eq!(pr("https://github.com/o/r/releases"), t("", None, &["o", "r"]));
+    assert_eq!(pr("https://codeberg.org/forgejo/forgejo/releases/tag/v1"), t("codeberg.org", Some("gitea"), &["forgejo", "forgejo"]));
+    assert_eq!(pr("codeberg.org/o/r.git"), t("codeberg.org", Some("gitea"), &["o", "r"]));
+    assert_eq!(pr("https://gitlab.com/gitlab-org/cli/-/releases"), t("gitlab.com", Some("gitlab"), &["gitlab-org", "cli"]));
+    assert_eq!(pr("https://gitlab.com/a/b/c/-/tags"), t("gitlab.com", Some("gitlab"), &["a", "b", "c"]));
+    assert_eq!(pr("https://git.example.org/o/r"), t("git.example.org", None, &["o", "r"]));
+    assert_eq!(pr("http://10.0.0.5:3000/o/r"), t("http://10.0.0.5:3000", None, &["o", "r"]));
+    assert_eq!(pr("HTTPS://Codeberg.ORG/O/R?tab=x#y"), t("codeberg.org", Some("gitea"), &["O", "R"]));
+    assert_eq!(pr("https://user:pw@codeberg.org/o/r"), None);
+    assert_eq!(pr("https://codeberg.org/onlyowner"), None);
+    assert_eq!(pr("https://github.com/onlyowner"), None);
+    assert_eq!(pr("https://codeberg.org/o/../x"), None);
+    assert_eq!(pr("hello"), None);
+    assert_eq!(pr(""), None);
+    assert_eq!(pr("bad host.org/o/r"), None);
+}
+
+#[test]
+fn keys_labels_and_pages() {
+    let gh = proj("O", "R");
+    assert_eq!((project_key(&gh).as_str(), repo_label(&gh).as_str()), ("o/r", "O/R"));
+    let cb = normalize_project(&json!({"owner": "O", "repo": "R", "host": "Codeberg.org", "kind": "gitea"})).unwrap();
+    assert_eq!((project_key(&cb).as_str(), repo_label(&cb).as_str()), ("codeberg.org/o/r", "codeberg.org/O/R"));
+    assert_eq!(release_page(&cb), "https://codeberg.org/O/R/releases");
+    let gl = normalize_project(&json!({"owner": "g/s", "repo": "p", "host": "gitlab.com", "kind": "gitlab"})).unwrap();
+    assert_eq!(release_page(&gl), "https://gitlab.com/g/s/p/-/releases");
+    assert_eq!(repo_page(&gl), "https://gitlab.com/g/s/p");
+    let lan = normalize_project(&json!({"owner": "o", "repo": "r", "host": "http://10.0.0.5:3000", "kind": "gitea"})).unwrap();
+    assert_eq!((project_key(&lan).as_str(), project_base(&lan).as_str()), ("10.0.0.5:3000/o/r", "http://10.0.0.5:3000"));
+}
+
+fn gitea_net() -> MockNet {
+    MockNet::new(Err(GitHubError::not_found()))
+        .url("http://h:1/api/v1/repos/own/proj/releases", Ok(json!([
+            {"id": 90, "tag_name": "v3.0.0-rc1", "name": "RC", "draft": false, "prerelease": true, "published_at": "2026-11-20T10:00:00Z", "html_url": "http://h:1/own/proj/releases/tag/v3.0.0-rc1"},
+            {"id": 80, "tag_name": "v2.9.0", "name": "Stable", "draft": false, "prerelease": false, "published_at": "2026-11-10T10:00:00Z", "html_url": "http://evil.example/x"},
+            {"id": 99, "tag_name": "v9-draft", "draft": true, "published_at": "2026-11-21T10:00:00Z"}
+        ])))
+        .url("http://h:1/api/v1/repos/own/proj", Ok(json!({"full_name": "Own/Proj", "name": "Proj", "description": "d", "html_url": "http://h:1/Own/Proj"})))
+        .url("http://h:1/api/v1/repos/own/tagsonly/releases", Ok(json!([])))
+        .url("http://h:1/api/v1/repos/own/tagsonly", Ok(json!({"full_name": "own/tagsonly", "name": "tagsonly"})))
+        .url("http://h:1/api/v4/projects/grp%2Fsub%2Fapp/releases", Ok(json!([
+            {"tag_name": "v9.9.9", "released_at": "2099-01-01T00:00:00Z", "upcoming_release": true, "_links": {"self": "http://evil.example/x"}},
+            {"tag_name": "v1.4.0", "name": "One four", "released_at": "2026-11-15T08:00:00Z", "upcoming_release": false, "_links": {"self": "http://h:1/grp/sub/app/-/releases/v1.4.0"}}
+        ])))
+        .url("http://h:1/api/v4/projects/grp%2Fsub%2Fapp", Ok(json!({"path_with_namespace": "grp/sub/app", "name": "App", "description": "gl", "web_url": "http://h:1/grp/sub/app"})))
+        .url("http://h:1/api/v4/projects/grp%2Fpriv", Err(GitHubError::Other("The server asks for a sign-in (HTTP 401).".into())))
+}
+
+#[test]
+fn resolve_gitea_forgejo_detected_on_unknown_host() {
+    let net = gitea_net();
+    let (info, l) = resolve_project(&net, "http://h:1", None, &segs(&["own", "proj"]), true).unwrap();
+    assert_eq!((info.owner.as_str(), info.repo.as_str(), info.kind.as_deref(), info.host.as_deref()), ("Own", "Proj", Some("gitea"), Some("http://h:1")));
+    assert_eq!((l.tag.as_str(), l.prerelease, l.id.clone()), ("v3.0.0-rc1", true, Id::Int(90)));
+    let (_, stable) = resolve_project(&net, "http://h:1", None, &segs(&["own", "proj"]), false).unwrap();
+    assert_eq!(stable.tag, "v2.9.0");
+    assert_eq!(stable.url, "http://h:1/Own/Proj/releases/tag/v2.9.0"); // foreign link replaced by the host's own page
+}
+
+#[test]
+fn resolve_gitlab_with_subgroup() {
+    let net = gitea_net();
+    let (info, l) = resolve_project(&net, "http://h:1", None, &segs(&["grp", "sub", "app"]), true).unwrap();
+    assert_eq!((info.owner.as_str(), info.repo.as_str(), info.kind.as_deref()), ("grp/sub", "app", Some("gitlab")));
+    assert_eq!((l.tag.as_str(), l.id.clone(), l.url.as_str()), ("v1.4.0", Id::Str("v1.4.0".into()), "http://h:1/grp/sub/app/-/releases/v1.4.0"));
+}
+
+#[test]
+fn resolve_rejects_tags_only_missing_private_unreachable() {
+    let net = gitea_net();
+    assert!(matches!(resolve_project(&net, "http://h:1", Some("gitea"), &segs(&["own", "tagsonly"]), true), Err(GitHubError::NoReleases(m)) if m.contains("no official releases")));
+    assert!(matches!(resolve_project(&net, "http://h:1", None, &segs(&["nope", "missing"]), true), Err(GitHubError::NotFound(m)) if m.contains("Could not find")));
+    assert!(matches!(resolve_project(&net, "http://h:1", Some("gitlab"), &segs(&["grp", "priv"]), true), Err(GitHubError::Other(m)) if m.contains("sign-in")));
+    let down = MockNet::new(Err(GitHubError::not_found())).url("http://h:1/", Err(GitHubError::Network("down".into())));
+    assert!(matches!(resolve_project(&down, "http://h:1", None, &segs(&["a", "b"]), true), Err(GitHubError::Network(_))));
+    assert_eq!(down.calls.borrow().len(), 1, "an unreachable server is probed once, not once per kind");
+}
+
+#[test]
+fn check_path_uses_no_token_and_handles_lost_releases() {
+    let net = gitea_net();
+    let l = fetch_latest_for(&net, "http://h:1", Some("gitea"), "Own", "Proj", "SECRET", true).unwrap().unwrap();
+    assert_eq!(l.tag, "v3.0.0-rc1");
+    assert!(net.calls.borrow().iter().all(|c| !c.contains("SECRET")));
+    assert_eq!(fetch_latest_for(&net, "http://h:1", Some("gitea"), "own", "tagsonly", "", true), Ok(None));
+}
+
+#[test]
+fn other_host_projects_storage_and_compat() {
+    let gh = proj("o", "r");
+    let gj = serde_json::to_string(&gh).unwrap();
+    assert!(!gj.contains("\"host\"") && !gj.contains("\"kind\""), "GitHub projects must serialize exactly as before");
+    assert!(gj.starts_with("{\"owner\":\"o\",\"repo\":\"r\",\"title\":"), "{}", gj);
+    let n = normalize_project(&json!({"owner": "grp/sub", "repo": "app", "host": "GitLab.com", "kind": "gitlab", "html_url": "https://evil.example/x",
+        "latest": {"id": "v1", "tag": "v1", "url": "https://evil.example/y", "published_at": "2026-01-01"}, "fmt": 2})).unwrap();
+    assert_eq!((n.host.as_deref(), n.html_url.as_str()), (Some("gitlab.com"), "https://gitlab.com/grp/sub/app"));
+    assert_eq!(n.latest.as_ref().unwrap().url, "https://gitlab.com/grp/sub/app/-/releases");
+    let nj = serde_json::to_string(&n).unwrap();
+    assert!(nj.starts_with("{\"owner\":\"grp/sub\",\"repo\":\"app\",\"host\":\"gitlab.com\",\"kind\":\"gitlab\",\"title\":"), "{}", nj);
+    assert!(normalize_project(&json!({"owner": "o", "repo": "r", "host": "github.com", "kind": "gitea"})).unwrap().host.is_none());
+    for bad in [json!({"owner": "a/b", "repo": "r"}), json!({"owner": "o", "repo": "r", "host": "x.org"}), json!({"owner": "o", "repo": "r", "host": "x.org", "kind": "svn"}),
+        json!({"owner": "o", "repo": "r", "host": "bad host", "kind": "gitea"}), json!({"owner": "o/../x", "repo": "r", "host": "x.org", "kind": "gitea"})] {
+        assert!(normalize_project(&bad).is_none(), "{}", bad);
+    }
+    assert_eq!(normalize_project(&json!("https://codeberg.org/o/r")).unwrap().host.as_deref(), Some("codeberg.org"));
+    assert!(normalize_project(&json!("https://git.example.org/o/r")).is_none());
+    let raw = json!({"projects": [n.clone(), gh.clone(), "owner/x", "https://git.example.org/o/r", "garbage"]});
+    let (imp, skipped) = parse_import(&raw).unwrap();
+    assert_eq!((imp.len(), skipped), (3, 2));
+    let (again, _) = parse_import(&build_export(&imp, "2026-11-22T00:00:00")).unwrap();
+    assert_eq!(again.iter().map(project_key).collect::<Vec<_>>(), imp.iter().map(project_key).collect::<Vec<_>>());
 }

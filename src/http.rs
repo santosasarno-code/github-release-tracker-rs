@@ -39,12 +39,12 @@ struct Response {
 fn net_error(code: u32) -> GitHubError {
     let why = match code {
         12002 => "the request timed out",
-        12007 | 12029 => "cannot reach GitHub (no internet connection, or it is blocked)",
+        12007 | 12029 => "cannot reach the server (no internet connection, or it is blocked)",
         12175 | 12157 => "secure connection failed",
-        12038 => "certificate error",
+        12038 => "certificate error (the server's certificate is not trusted)",
         _ => "request failed",
     };
-    GitHubError::Other(format!("Network error: {} (code {}).", why, code))
+    GitHubError::Network(format!("Network error: {} (code {}).", why, code))
 }
 
 impl WinHttpNet {
@@ -79,16 +79,16 @@ impl WinHttpNet {
         }
     }
 
-    fn get(&self, host: &str, path: &str, headers: &str) -> Result<Response, GitHubError> {
+    fn get(&self, host: &str, port: u16, secure: bool, path: &str, headers: &str) -> Result<Response, GitHubError> {
         if self.session.is_null() {
-            return Err(GitHubError::Other("Network error: could not start WinHTTP.".into()));
+            return Err(GitHubError::Network("Network error: could not start WinHTTP.".into()));
         }
         unsafe {
-            let conn = Handle(WinHttpConnect(self.session, w(host).as_ptr(), INTERNET_DEFAULT_HTTPS_PORT as u16, 0));
+            let conn = Handle(WinHttpConnect(self.session, w(host).as_ptr(), port, 0));
             if conn.0.is_null() {
                 return Err(net_error(GetLastError()));
             }
-            let req = Handle(WinHttpOpenRequest(conn.0, w("GET").as_ptr(), w(path).as_ptr(), null(), null(), null_mut(), WINHTTP_FLAG_SECURE));
+            let req = Handle(WinHttpOpenRequest(conn.0, w("GET").as_ptr(), w(path).as_ptr(), null(), null(), null_mut(), if secure { WINHTTP_FLAG_SECURE } else { 0 }));
             if req.0.is_null() {
                 return Err(net_error(GetLastError()));
             }
@@ -115,7 +115,7 @@ impl WinHttpNet {
                 }
                 body.extend_from_slice(&chunk[..read as usize]);
                 if body.len() > MAX_BODY {
-                    return Err(GitHubError::Other("Response from GitHub was too large.".into()));
+                    return Err(GitHubError::Other("The server's answer was too large.".into()));
                 }
             }
             Ok(Response { status, remaining, reset, body })
@@ -137,7 +137,7 @@ impl Net for WinHttpNet {
         if !token.is_empty() {
             headers.push_str(&format!("Authorization: Bearer {}\r\n", token));
         }
-        let r = self.get("api.github.com", path, &headers)?;
+        let r = self.get("api.github.com", INTERNET_DEFAULT_HTTPS_PORT as u16, true, path, &headers)?;
         if let Some(n) = r.remaining.as_deref().and_then(|s| s.trim().parse::<i64>().ok()) {
             self.rate.store(n, Ordering::Relaxed);
         }
@@ -157,7 +157,7 @@ impl Net for WinHttpNet {
 
     fn feed_get(&self, owner: &str, repo: &str) -> Result<String, GitHubError> {
         let path = format!("/{}/{}/releases.atom", owner, repo);
-        let r = self.get("github.com", &path, "User-Agent: GitHubReleaseTracker\r\nAccept: application/atom+xml, application/xml;q=0.9, */*;q=0.8\r\n")?;
+        let r = self.get("github.com", INTERNET_DEFAULT_HTTPS_PORT as u16, true, &path, "User-Agent: GitHubReleaseTracker\r\nAccept: application/atom+xml, application/xml;q=0.9, */*;q=0.8\r\n")?;
         match r.status {
             200..=299 => Ok(String::from_utf8_lossy(&r.body).into_owned()),
             404 => Err(GitHubError::not_found()),
@@ -166,8 +166,46 @@ impl Net for WinHttpNet {
         }
     }
 
+    fn http_json(&self, url: &str) -> Result<Value, GitHubError> {
+        let (secure, host, port, path) = split_url(url).ok_or_else(|| GitHubError::Other("Not a valid web address.".into()))?;
+        let r = self.get(&host, port, secure, &path, "Accept: application/json\r\nUser-Agent: GitHubReleaseTracker\r\n")?;
+        match r.status {
+            200..=299 => serde_json::from_slice(&r.body)
+                .map_err(|_| GitHubError::Other("Unexpected answer (not JSON). This does not look like a GitLab or Gitea/Forgejo server.".into())),
+            404 => Err(GitHubError::not_found()),
+            401 | 403 => Err(GitHubError::Other(format!(
+                "The server asks for a sign-in (HTTP {}). Only public repositories work, and tokens are not supported for this host.",
+                r.status
+            ))),
+            429 => Err(GitHubError::Other("The server is rate-limiting requests (429). Try again later.".into())),
+            s => Err(GitHubError::Other(format!("The server returned HTTP {}.", s))),
+        }
+    }
+
     fn rate_remaining(&self) -> Option<i64> {
         let v = self.rate.load(Ordering::Relaxed);
         if v < 0 { None } else { Some(v) }
     }
+}
+
+/// "https://host:3000/path?q" -> (secure, host, port, "/path?q")
+fn split_url(url: &str) -> Option<(bool, String, u16, String)> {
+    let (secure, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (true, r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (false, r)
+    } else {
+        return None;
+    };
+    let end = rest.find('/').unwrap_or(rest.len());
+    let hostport = &rest[..end];
+    let path = if end < rest.len() { &rest[end..] } else { "/" };
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().ok()?),
+        None => (hostport, if secure { 443 } else { 80 }),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((secure, host.to_string(), port, path.to_string()))
 }

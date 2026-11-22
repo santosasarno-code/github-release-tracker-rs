@@ -1,6 +1,6 @@
 # GitHub Release Tracker (Rust edition)
 
-A small, portable Windows app that tracks the latest release of the GitHub projects you care about and tells you when a new one appears. No account, no login, and no token needed.
+A small, portable Windows app that tracks the latest release of the projects you care about (GitHub, GitLab, Codeberg, Gitea / Forgejo and self-hosted servers) and tells you when a new one appears. No account, no login, and no token needed.
 
 > **Rewrite notice:** this project is a complete rewrite, in Rust with a native Win32 interface, of my earlier Python / tkinter app **[github-release-tracker](https://github.com/santosasarno-code/github-release-tracker)**. It has the same features and uses the same `projects.json`, so you can switch between the two without losing your list. The Python version stays available.
 
@@ -11,6 +11,7 @@ It ships as one small `.exe` with nothing to install.
 ## Features
 
 - Add a project by pasting a GitHub URL or `owner/repo`
+- **Other hosts, same way.** Paste the URL of a project on **GitLab** (`gitlab.com` or your own server, including groups and subgroups), **Codeberg**, **Gitea**, **Forgejo** or any self-hosted server of those. Public repositories only, no token. Only **official releases** are tracked: a project that has just tags (or nothing yet) is refused when you add it
 - See the project name, repository, current release, publish date and status at a glance
 - **Check for updates** refreshes every project; a newer release is highlighted as `Update available: v1.0 -> v1.1`
 - **Mark as seen** clears the highlight once you have dealt with an update
@@ -48,7 +49,11 @@ By hand: `cargo test --lib` runs the logic tests, `cargo build --release` builds
 ## Settings and data
 
 - `projects.json` is compatible with the Python version in both directions (custom names are ignored by Python versions older than 1.1.0).
-- The optional GitHub token (Settings) is stored in plain text in `projects.json` and never exported. Normal use does not need it: releases are read from GitHub's public feed.
+- The optional GitHub token (Settings) is stored in plain text in `projects.json` and never exported. Normal use does not need it: releases are read from GitHub's public feed. It is sent to `github.com` only, never to another host.
+- Projects on other hosts are read through that host's public API (GitLab: `/api/v4/projects/<path>/releases`, Gitea / Forgejo / Codeberg: `/api/v1/repos/<owner>/<repo>/releases`). Draft releases and GitLab "upcoming" releases are ignored. For a server it does not know, the app tries the Gitea / Forgejo API first and then GitLab's, once, when you add the project. No token is ever sent to these hosts (the optional GitHub token is used for `github.com` only).
+- Links stored in your data are only opened if they point to the project's own host.
+- Other hosts: public repositories only (no token), official releases only (not bare tags), and there is no pre-release marker on GitLab. A self-hosted server with a certificate Windows does not trust is refused (the app never turns certificate checks off). A `http://` address is used only if you type it that way.
+- Older versions (before this one) do not understand projects from other hosts: they skip them when reading `projects.json` and drop them when saving. Use the new version everywhere you share the file.
 
 ## Project layout
 

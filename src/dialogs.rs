@@ -122,7 +122,7 @@ pub fn show_settings(app: &App) {
             let d = app.data.borrow();
             (d.settings.token.clone(), d.settings.check_on_launch)
         };
-        child(dlg, app, "STATIC", "GitHub personal access token (optional)", SS_LEFT as u32, 0, 300, 14, 14, 412, 18);
+        child(dlg, app, "STATIC", "GitHub token (optional, used for github.com only)", SS_LEFT as u32, 0, 300, 14, 14, 412, 18);
         let edit = child(dlg, app, "EDIT", "", (WS_TABSTOP | ES_AUTOHSCROLL as u32 | ES_PASSWORD as u32) as u32, 0, ID_TOKEN, 22, 40, 396, 18);
         SetWindowTextW(edit, w(&token).as_ptr());
         SendMessageW(edit, EM_SETLIMIT, 200, 0);
@@ -153,7 +153,7 @@ unsafe fn run_modal_keep(parent: HWND, dlg: HWND, st: &Dlg, app: &App, _edit: HW
 pub fn show_about(app: &App, parent: HWND) {
     unsafe {
         let st = Dlg { app, done: Cell::new(false), save: Cell::new(false), brush: Cell::new(null_mut()), field: Cell::new(null_mut()) };
-        let dlg = make_dialog(app, parent, &format!("About {}", APP_NAME), 430, 196, &st);
+        let dlg = make_dialog(app, parent, &format!("About {}", APP_NAME), 430, 212, &st);
         if dlg.is_null() {
             return;
         }
@@ -165,12 +165,12 @@ pub fn show_about(app: &App, parent: HWND) {
         child(dlg, app, "STATIC", &format!("Version {}", APP_VERSION), SS_LEFT as u32, 0, 410, 80, 42, 336, 18);
         child(
             dlg, app, "STATIC",
-            "Tracks the latest release of the GitHub projects you follow. No account, login or token needed. MIT License.",
-            SS_LEFT as u32, 0, ID_NOTE, 80, 66, 336, 40,
+            "Tracks the latest release of the projects you follow on GitHub, GitLab, Codeberg and other Git servers. No account, login or token needed. MIT License.",
+            SS_LEFT as u32, 0, ID_NOTE, 80, 66, 336, 54,
         );
-        child(dlg, app, "STATIC", REPO_URL, SS_LEFT as u32 | SS_NOTIFY as u32, 0, ID_LINK, 80, 112, 336, 18);
-        child(dlg, app, "BUTTON", "Copy version", WS_TABSTOP | BS_PUSHBUTTON as u32, 0, ID_COPYVER, 430 - 16 - 84 - 8 - 96, 152, 96, 28);
-        child(dlg, app, "BUTTON", "Close", WS_TABSTOP | BS_DEFPUSHBUTTON as u32, 0, ID_CLOSE, 430 - 16 - 84, 152, 84, 28);
+        child(dlg, app, "STATIC", REPO_URL, SS_LEFT as u32 | SS_NOTIFY as u32, 0, ID_LINK, 80, 124, 336, 18);
+        child(dlg, app, "BUTTON", "Copy version", WS_TABSTOP | BS_PUSHBUTTON as u32, 0, ID_COPYVER, 430 - 16 - 84 - 8 - 96, 168, 96, 28);
+        child(dlg, app, "BUTTON", "Close", WS_TABSTOP | BS_DEFPUSHBUTTON as u32, 0, ID_CLOSE, 430 - 16 - 84, 168, 84, 28);
         run_modal(parent, dlg, &st, app);
     }
 }

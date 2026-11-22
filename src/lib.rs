@@ -25,6 +25,10 @@ pub const SORTABLE: [&str; 4] = ["name", "repo", "published", "status"];
 pub enum GitHubError {
     NotFound(String),
     RateLimit(String),
+    /// The server could not be reached at all (DNS, refused, timeout, certificate).
+    Network(String),
+    /// The project exists but has no official release (only tags, or nothing).
+    NoReleases(String),
     Other(String),
 }
 
@@ -37,7 +41,11 @@ impl GitHubError {
 impl fmt::Display for GitHubError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GitHubError::NotFound(m) | GitHubError::RateLimit(m) | GitHubError::Other(m) => f.write_str(m),
+            GitHubError::NotFound(m)
+            | GitHubError::RateLimit(m)
+            | GitHubError::Network(m)
+            | GitHubError::NoReleases(m)
+            | GitHubError::Other(m) => f.write_str(m),
         }
     }
 }
@@ -48,6 +56,8 @@ pub trait Net {
     fn api_get(&self, path: &str, token: &str) -> Result<Value, GitHubError>;
     /// GET the public releases.atom feed of owner/repo; the body as text.
     fn feed_get(&self, owner: &str, repo: &str) -> Result<String, GitHubError>;
+    /// GET a public JSON document from any host (GitLab, Gitea / Forgejo, ...); no credentials are sent.
+    fn http_json(&self, url: &str) -> Result<Value, GitHubError>;
     /// API calls left this hour, as reported by the last API response.
     fn rate_remaining(&self) -> Option<i64>;
 }
@@ -77,6 +87,12 @@ pub struct Release {
 pub struct Project {
     pub owner: String,
     pub repo: String,
+    /// Only for projects that are not on github.com: "codeberg.org", or "http://host:3000" when typed so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// "gitlab" or "gitea" (Forgejo / Codeberg speak the Gitea API). Present together with `host`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub title: String,
     pub description: String,
     pub html_url: String,
@@ -128,7 +144,7 @@ fn is_name_char(c: char) -> bool {
 /// `^[A-Za-z0-9_.-]{1,100}$`
 pub fn valid_name(s: &str) -> bool {
     let n = s.chars().count();
-    (1..=100).contains(&n) && s.chars().all(is_name_char)
+    (1..=100).contains(&n) && s.chars().all(is_name_char) && !s.chars().all(|c| c == '.') // no "." / ".." (path tricks)
 }
 
 fn take_name(s: &str) -> (&str, &str) {
@@ -191,12 +207,16 @@ fn str_field(v: Option<&Value>, limit: usize) -> String {
     }
 }
 
-/// Only ever open https://github.com/... links, whatever a JSON file says.
-pub fn safe_github_url(url: Option<&str>, fallback: &str) -> String {
+/// Only ever open links that live on the project's own host, whatever a JSON file says.
+pub fn safe_url(url: Option<&str>, base: &str, fallback: &str) -> String {
     match url {
-        Some(u) if u.starts_with("https://github.com/") && u.chars().count() < 500 && !u.chars().any(|c| c.is_whitespace()) => u.to_string(),
+        Some(u) if u.starts_with(&format!("{}/", base)) && u.chars().count() < 500 && !u.chars().any(|c| c.is_whitespace()) => u.to_string(),
         _ => fallback.to_string(),
     }
+}
+
+pub fn safe_github_url(url: Option<&str>, fallback: &str) -> String {
+    safe_url(url, "https://github.com", fallback)
 }
 
 fn id_value(v: Option<&Value>) -> Option<Id> {
@@ -247,8 +267,40 @@ pub fn url_unquote(s: &str) -> String {
 // ---------------------------------------------------------------------------
 // Project helpers
 // ---------------------------------------------------------------------------
+fn host_of(p: &Project) -> Option<&str> {
+    p.host.as_deref().filter(|h| !h.is_empty())
+}
+
 pub fn project_key(p: &Project) -> String {
-    format!("{}/{}", p.owner, p.repo).to_lowercase()
+    match host_of(p) {
+        Some(h) => format!("{}/{}/{}", host_label(h), p.owner, p.repo).to_lowercase(),
+        None => format!("{}/{}", p.owner, p.repo).to_lowercase(),
+    }
+}
+
+pub fn project_base(p: &Project) -> String {
+    match host_of(p) {
+        Some(h) => host_base(h),
+        None => "https://github.com".to_string(),
+    }
+}
+
+pub fn repo_page(p: &Project) -> String {
+    format!("{}/{}/{}", project_base(p), p.owner, p.repo)
+}
+
+/// The page listing the project's releases (used when no exact release link is known).
+pub fn release_page(p: &Project) -> String {
+    let tail = if p.kind.as_deref() == Some("gitlab") { "/-/releases" } else { "/releases" };
+    format!("{}{}", repo_page(p), tail)
+}
+
+/// What the Repository column shows: owner/repo, with the host in front for other hosts.
+pub fn repo_label(p: &Project) -> String {
+    match host_of(p) {
+        Some(h) => format!("{}/{}/{}", host_label(h), p.owner, p.repo),
+        None => format!("{}/{}", p.owner, p.repo),
+    }
 }
 
 pub fn display_name(p: &Project) -> String {
@@ -347,7 +399,7 @@ pub fn apply_result(p: &mut Project, latest: Option<Release>, err: Option<String
 // ---------------------------------------------------------------------------
 // Normalizing untrusted input
 // ---------------------------------------------------------------------------
-fn normalize_release(v: Option<&Value>, owner: &str, repo: &str) -> Option<Release> {
+fn normalize_release(v: Option<&Value>, base: &str, fallback: &str) -> Option<Release> {
     let r = v?.as_object()?;
     let tag = str_field(r.get("tag"), 200);
     let id = match id_value(r.get("id")) {
@@ -364,7 +416,7 @@ fn normalize_release(v: Option<&Value>, owner: &str, repo: &str) -> Option<Relea
         tag,
         name: str_field(r.get("name"), 300),
         published_at: str_field(r.get("published_at"), 40),
-        url: safe_github_url(r.get("url").and_then(|u| u.as_str()), &format!("https://github.com/{}/{}/releases", owner, repo)),
+        url: safe_url(r.get("url").and_then(|u| u.as_str()), base, fallback),
         prerelease: r.get("prerelease").map_or(false, truthy),
         source,
     })
@@ -387,8 +439,16 @@ pub fn normalize_project(raw: &Value) -> Option<Project> {
     let owned;
     let o = match raw {
         Value::String(s) => {
-            let (owner, repo) = parse_repo(s)?;
-            owned = json!({ "owner": owner, "repo": repo });
+            let r = parse_project_ref(s)?;
+            if !r.host.is_empty() && r.kind.is_none() {
+                return None; // an unknown server cannot be identified offline
+            }
+            let (owner, repo) = split_path(&r.segs);
+            owned = if r.host.is_empty() {
+                json!({ "owner": owner, "repo": repo })
+            } else {
+                json!({ "owner": owner, "repo": repo, "host": r.host, "kind": r.kind })
+            };
             obj = owned.as_object()?;
             obj
         }
@@ -397,7 +457,25 @@ pub fn normalize_project(raw: &Value) -> Option<Project> {
     };
     let owner = o.get("owner")?.as_str()?;
     let repo = o.get("repo")?.as_str()?;
-    if !valid_name(owner) || !valid_name(repo) {
+    let (host, kind): (Option<String>, Option<String>) = match o.get("host") {
+        None | Some(Value::Null) => (None, None),
+        Some(Value::String(h)) if h.is_empty() || h == "github.com" => (None, None),
+        Some(Value::String(h)) => {
+            let h = h.to_lowercase();
+            match o.get("kind").and_then(|k| k.as_str()) {
+                Some(k @ ("gitlab" | "gitea")) if valid_host(&h) => (Some(h), Some(k.to_string())),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    let owner_ok = if host.is_some() {
+        let n = owner.split('/').count();
+        (1..MAX_PATH_SEGMENTS).contains(&n) && owner.split('/').all(valid_name)
+    } else {
+        valid_name(owner)
+    };
+    if !owner_ok || !valid_name(repo) {
         return None;
     }
     let title = str_field(o.get("title"), 200);
@@ -407,21 +485,27 @@ pub fn normalize_project(raw: &Value) -> Option<Project> {
     };
     let error = str_field(o.get("error"), 300);
     let seen_tag = str_field(o.get("seen_tag"), 200);
-    Some(Project {
+    let mut p = Project {
         owner: owner.to_string(),
         repo: repo.to_string(),
+        host,
+        kind,
         title: if title.is_empty() { repo.to_string() } else { title },
         description: str_field(o.get("description"), 500),
-        html_url: safe_github_url(o.get("html_url").and_then(|u| u.as_str()), &format!("https://github.com/{}/{}", owner, repo)),
+        html_url: String::new(),
         include_prereleases: o.get("include_prereleases").map_or(true, truthy),
         fmt: if o.get("fmt").and_then(|f| f.as_i64()) == Some(2) { Some(2) } else { None },
-        latest: normalize_release(o.get("latest"), owner, repo),
+        latest: None,
         seen_id: id_value(o.get("seen_id")),
         seen_tag: if seen_tag.is_empty() { None } else { Some(seen_tag) },
         last_checked: str_field(o.get("last_checked"), 40),
         error: if error.is_empty() { None } else { Some(error) },
         custom_name: if custom.is_empty() { None } else { Some(custom) },
-    })
+    };
+    let base = project_base(&p);
+    p.html_url = safe_url(o.get("html_url").and_then(|u| u.as_str()), &base, &repo_page(&p));
+    p.latest = normalize_release(o.get("latest"), &base, &release_page(&p));
+    Some(p)
 }
 
 /// (projects, skipped) or None if there is no project list. Accepts {"projects": [...]}, a bare list,
@@ -567,6 +651,8 @@ pub struct RepoInfo {
     pub title: String,
     pub description: String,
     pub html_url: String,
+    pub host: Option<String>,
+    pub kind: Option<String>,
 }
 
 pub fn fetch_repo_info(net: &dyn Net, owner: &str, repo: &str, token: &str) -> Result<RepoInfo, GitHubError> {
@@ -580,6 +666,8 @@ pub fn fetch_repo_info(net: &dyn Net, owner: &str, repo: &str, token: &str) -> R
         html_url: if s("html_url").is_empty() { format!("https://github.com/{}", full) } else { s("html_url") },
         owner: ro,
         repo: rr,
+        host: None,
+        kind: None,
     })
 }
 
@@ -776,6 +864,257 @@ pub fn get_latest(net: &dyn Net, owner: &str, repo: &str, token: &str, include_p
         }
     }
     fetch_latest_release(net, owner, repo, token, include_pre)
+}
+
+// ---------------------------------------------------------------------------
+// Other hosts: GitLab, Gitea / Forgejo (Codeberg) and self-hosted servers.
+// Public repositories only, no token, official releases only (not bare tags).
+// A GitHub project has no "host" / "kind" keys, so GitHub-only files stay as they were.
+// ---------------------------------------------------------------------------
+/// host -> kind ("gitea" also covers Forgejo, which speaks the same API)
+pub const KNOWN_HOSTS: [(&str, &str); 4] = [("gitlab.com", "gitlab"), ("codeberg.org", "gitea"), ("gitea.com", "gitea"), ("code.forgejo.org", "gitea")];
+pub const MAX_PATH_SEGMENTS: usize = 20;
+
+fn known_kind(netloc: &str) -> Option<&'static str> {
+    KNOWN_HOSTS.iter().find(|(h, _)| *h == netloc).map(|(_, k)| *k)
+}
+
+/// `^(http://)?[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:\d{1,5})?$`
+pub fn valid_host(h: &str) -> bool {
+    let rest = h.strip_prefix("http://").unwrap_or(h);
+    let (name, port) = match rest.split_once(':') {
+        Some((n, p)) => (n, Some(p)),
+        None => (rest, None),
+    };
+    if let Some(p) = port {
+        if p.is_empty() || p.len() > 5 || !p.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+    }
+    let b = name.as_bytes();
+    let alnum = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit();
+    !b.is_empty() && b.len() <= 253 && alnum(b[0]) && alnum(b[b.len() - 1]) && b.iter().all(|&c| alnum(c) || c == b'.' || c == b'-')
+}
+
+/// Base URL of a stored host: "codeberg.org" -> https://codeberg.org; "http://x:3000" stays http.
+pub fn host_base(host: &str) -> String {
+    if host.starts_with("http://") { host.to_string() } else { format!("https://{}", host) }
+}
+
+pub fn host_label(host: &str) -> &str {
+    host.strip_prefix("http://").unwrap_or(host)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectRef {
+    /// "" = github.com; otherwise "example.org" (https) or "http://example.org:3000" (only when typed so).
+    pub host: String,
+    /// "gitlab" / "gitea" for known hosts, None for an unknown server (found out when adding).
+    pub kind: Option<String>,
+    /// [owner, repo] for GitHub / Gitea; the full path for GitLab (groups and subgroups).
+    pub segs: Vec<String>,
+}
+
+fn strip_prefix_ci<'a>(s: &'a str, p: &str) -> Option<&'a str> {
+    if s.len() >= p.len() && s.is_char_boundary(p.len()) && s[..p.len()].eq_ignore_ascii_case(p) { Some(&s[p.len()..]) } else { None }
+}
+
+pub fn split_path(segs: &[String]) -> (String, String) {
+    match segs.split_last() {
+        Some((last, head)) => (head.join("/"), last.clone()),
+        None => (String::new(), String::new()),
+    }
+}
+
+/// Understand a pasted project reference (GitHub, or any other host).
+pub fn parse_project_ref(text: &str) -> Option<ProjectRef> {
+    let text = text.trim();
+    if let Some((o, r)) = parse_repo(text) {
+        return Some(ProjectRef { host: String::new(), kind: None, segs: vec![o, r] });
+    }
+    let (https, rest) = if let Some(r) = strip_prefix_ci(text, "https://") {
+        (true, Some(r))
+    } else if let Some(r) = strip_prefix_ci(text, "http://") {
+        (false, Some(r))
+    } else {
+        (true, None)
+    };
+    let (netloc, path): (String, String) = match rest {
+        Some(r) => {
+            let r = r.split_whitespace().next().unwrap_or(""); // a URL ends at the first whitespace
+            let nend = r.find(['/', '?', '#']).unwrap_or(r.len());
+            let path = r[nend..].split(['?', '#']).next().unwrap_or("");
+            (r[..nend].to_ascii_lowercase(), path.to_string())
+        }
+        None => {
+            // "codeberg.org/owner/repo" without the scheme
+            if text.chars().any(|c| c.is_whitespace() || c == '?' || c == '#') {
+                return None;
+            }
+            let end = text.find('/')?;
+            let nl = text[..end].to_ascii_lowercase();
+            let name = nl.split(':').next().unwrap_or("");
+            if !name.contains('.') || name.split('.').any(|l| l.is_empty() || !l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')) {
+                return None;
+            }
+            (nl, text[end..].to_string())
+        }
+    };
+    if netloc.contains('@') || netloc == "github.com" || netloc == "www.github.com" {
+        return None;
+    }
+    let host = if https { netloc.clone() } else { format!("http://{}", netloc) };
+    if !valid_host(&host) {
+        return None;
+    }
+    let kind = known_kind(&netloc);
+    let mut path = path.split("/-/").next().unwrap_or("").to_string();
+    if path.ends_with("/-") {
+        path.truncate(path.len() - 2);
+    }
+    let mut segs: Vec<String> = path.split('/').filter(|x| !x.is_empty()).map(String::from).collect();
+    if let Some(l) = segs.last_mut() {
+        if let Some(x) = l.strip_suffix(".git") {
+            *l = x.to_string();
+        }
+    }
+    if segs.len() < 2 || segs.len() > MAX_PATH_SEGMENTS || !segs.iter().all(|x| valid_name(x)) {
+        return None;
+    }
+    if kind == Some("gitea") {
+        segs.truncate(2);
+    }
+    Some(ProjectRef { host, kind: kind.map(String::from), segs })
+}
+
+fn api_url(base: &str, kind: &str, path: &[String], tail: &str) -> String {
+    if kind == "gitea" {
+        format!("{}/api/v1/repos/{}{}", base, path.iter().map(|x| url_quote(x)).collect::<Vec<_>>().join("/"), tail)
+    } else {
+        format!("{}/api/v4/projects/{}{}", base, url_quote(&path.join("/")), tail)
+    }
+}
+
+fn host_info(net: &dyn Net, base: &str, host: &str, kind: &str, path: &[String]) -> Result<RepoInfo, GitHubError> {
+    let d = net.http_json(&api_url(base, kind, path, ""))?;
+    if !d.is_object() {
+        return Err(GitHubError::Other("Unexpected answer from the server.".into()));
+    }
+    let key = if kind == "gitea" { "full_name" } else { "path_with_namespace" };
+    let full = d.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).ok_or_else(|| GitHubError::NotFound("Not found on this server.".into()))?;
+    let parts: Vec<String> = full.split('/').map(String::from).collect();
+    if !(2..=MAX_PATH_SEGMENTS).contains(&parts.len()) || !parts.iter().all(|x| valid_name(x)) {
+        return Err(GitHubError::Other("Unexpected project name from the server.".into()));
+    }
+    let (owner, repo) = split_path(&parts);
+    let page = format!("{}/{}", base, full);
+    let url_key = if kind == "gitea" { "html_url" } else { "web_url" };
+    let title = str_field(d.get("name"), 200);
+    Ok(RepoInfo {
+        title: if title.is_empty() { repo.clone() } else { title },
+        description: str_field(d.get("description"), 500),
+        html_url: safe_url(d.get(url_key).and_then(|v| v.as_str()), base, &page),
+        owner,
+        repo,
+        host: Some(host.to_string()),
+        kind: Some(kind.to_string()),
+    })
+}
+
+/// One release object from the server -> this app's release (None if unusable).
+fn host_release(base: &str, kind: &str, owner: &str, repo: &str, r: &Value) -> Option<Release> {
+    if !r.is_object() || r.get("draft").map_or(false, truthy) {
+        return None;
+    }
+    let tag = str_field(r.get("tag_name"), 200);
+    if tag.is_empty() {
+        return None;
+    }
+    let full = format!("{}/{}", owner, repo);
+    let pick = |a: &str, b: &str| {
+        let x = str_field(r.get(a), 40);
+        if x.is_empty() { str_field(r.get(b), 40) } else { x }
+    };
+    let (id, when, url, fallback, pre) = if kind == "gitea" {
+        let id = match r.get("id") {
+            Some(Value::Number(n)) if n.is_i64() => Id::Int(n.as_i64().unwrap_or(0)),
+            _ => Id::Str(tag.clone()),
+        };
+        (id, pick("published_at", "created_at"), r.get("html_url"), format!("{}/{}/releases/tag/{}", base, full, url_quote(&tag)), r.get("prerelease").map_or(false, truthy))
+    } else {
+        if r.get("upcoming_release").map_or(false, truthy) {
+            return None; // dated in the future: not released yet
+        }
+        let url = r.get("_links").and_then(|l| l.get("self"));
+        (Id::Str(tag.clone()), pick("released_at", "created_at"), url, format!("{}/{}/-/releases/{}", base, full, url_quote(&tag)), false)
+    };
+    Some(Release {
+        id,
+        name: str_field(r.get("name"), 300),
+        published_at: when,
+        url: safe_url(url.and_then(|v| v.as_str()), base, &fallback),
+        prerelease: pre,
+        source: "release".into(),
+        tag,
+    })
+}
+
+/// Newest official release of a project on another host, or None if it has none.
+pub fn fetch_latest_host(net: &dyn Net, host: &str, kind: &str, owner: &str, repo: &str, include_pre: bool) -> Result<Option<Release>, GitHubError> {
+    let base = host_base(host);
+    let path: Vec<String> = format!("{}/{}", owner, repo).split('/').map(String::from).collect();
+    let tail = if kind == "gitea" { "/releases?limit=10" } else { "/releases?per_page=10" };
+    let data = net.http_json(&api_url(&base, kind, &path, tail))?;
+    let arr = data.as_array().ok_or_else(|| GitHubError::Other("Unexpected answer from the server.".into()))?;
+    let rels: Vec<Release> = arr.iter().filter_map(|r| host_release(&base, kind, owner, repo, r)).collect();
+    if !include_pre {
+        if let Some(r) = rels.iter().find(|r| !r.prerelease) {
+            return Ok(Some(r.clone()));
+        }
+    }
+    Ok(rels.into_iter().next())
+}
+
+/// Add-time lookup on another host: find out what the server is, check that the project exists and has
+/// an official release.
+pub fn resolve_project(net: &dyn Net, host: &str, kind: Option<&str>, segs: &[String], include_pre: bool) -> Result<(RepoInfo, Release), GitHubError> {
+    let base = host_base(host);
+    let kinds: Vec<&str> = match kind {
+        Some(k) => vec![k],
+        None => vec!["gitea", "gitlab"],
+    };
+    let mut last: Option<GitHubError> = None;
+    for k in kinds {
+        let path: &[String] = if k == "gitea" { &segs[..segs.len().min(2)] } else { segs };
+        let attempt = host_info(net, &base, host, k, path).and_then(|info| {
+            let latest = fetch_latest_host(net, host, k, &info.owner, &info.repo, include_pre)?;
+            Ok((info, latest))
+        });
+        match attempt {
+            Err(e @ GitHubError::Network(_)) => return Err(e), // unreachable: another kind will not help
+            Err(e) => {
+                if last.is_none() {
+                    last = Some(e);
+                }
+            }
+            Ok((info, None)) => {
+                return Err(GitHubError::NoReleases(format!("{} has no official releases (only tags, or nothing yet), so it cannot be tracked.", info.title)));
+            }
+            Ok((info, Some(l))) => return Ok((info, l)),
+        }
+    }
+    match last {
+        Some(e) if kind.is_some() || !matches!(e, GitHubError::NotFound(_)) => Err(e),
+        _ => Err(GitHubError::NotFound(format!("Could not find this project on {}. It must be a public repository on a GitLab, Gitea or Forgejo server.", host_label(host)))),
+    }
+}
+
+/// Latest release for a GitHub project (host "") or one on another host.
+pub fn fetch_latest_for(net: &dyn Net, host: &str, kind: Option<&str>, owner: &str, repo: &str, token: &str, include_pre: bool) -> Result<Option<Release>, GitHubError> {
+    if host.is_empty() {
+        return get_latest(net, owner, repo, token, include_pre);
+    }
+    fetch_latest_host(net, host, kind.unwrap_or("gitea"), owner, repo, include_pre)
 }
 
 // ---------------------------------------------------------------------------

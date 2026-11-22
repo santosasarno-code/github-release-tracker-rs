@@ -353,7 +353,7 @@ impl App {
             let mk = |class: &str, text: &str, style: u32, ex: u32, id: i32| -> HWND {
                 CreateWindowExW(ex, w(class).as_ptr(), w(text).as_ptr(), WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, hwnd, id as usize as HMENU, hi, null())
             };
-            let label = mk("STATIC", "GitHub project (URL or owner/repo):", SS_LEFT as u32 | SS_CENTERIMAGE as u32, 0, ID_LABEL);
+            let label = mk("STATIC", "Project (repo URL or owner/repo):", SS_LEFT as u32 | SS_CENTERIMAGE as u32, 0, ID_LABEL);
             let entry = mk("EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL as u32, 0, ID_ENTRY);
             for (id, glyph, text) in BUTTONS {
                 let _ = glyph;
@@ -538,7 +538,7 @@ impl App {
             let (cw, ch) = (rc.right, rc.bottom);
             let (m, gap, row_h, btn_h) = (self.s(10), self.s(8), self.s(28), self.s(30));
             let hdc = GetDC(hwnd);
-            let label_w = self.text_width(hdc, "GitHub project (URL or owner/repo):") + self.s(4);
+            let label_w = self.text_width(hdc, "Project (repo URL or owner/repo):") + self.s(4);
             let add_w = self.button_width(hdc, "Add project");
             ReleaseDC(hwnd, hdc);
             // One batched move for every control: a single repaint pass instead of one per control.
@@ -717,7 +717,7 @@ impl App {
         };
         match col {
             0 => display_name(p),
-            1 => format!("{}/{}", p.owner, p.repo),
+            1 => repo_label(p),
             2 => release_label(p),
             3 => published_label(p),
             4 => status_text(p),
@@ -828,30 +828,41 @@ impl App {
             GetWindowTextW(e, buf.as_mut_ptr(), buf.len() as i32);
             from_wide_buf(&buf)
         };
-        let (owner, repo) = match parse_repo(&text) {
+        let pref = match parse_project_ref(&text) {
             Some(x) => x,
             None => {
-                message_box(hwnd, "Enter a GitHub URL such as\nhttps://github.com/owner/repo\nor just owner/repo.", MB_OK | MB_ICONERROR);
+                message_box(
+                    hwnd,
+                    "Enter a project URL such as\nhttps://github.com/owner/repo,\nhttps://codeberg.org/owner/repo or https://gitlab.com/group/project\n(any GitLab, Gitea or Forgejo server works), or just owner/repo for GitHub.",
+                    MB_OK | MB_ICONERROR,
+                );
                 return;
             }
         };
-        let key = format!("{}/{}", owner, repo).to_lowercase();
-        if self.data.borrow().projects.iter().any(|p| project_key(p) == key) {
-            message_box(hwnd, &format!("{}/{} is already in the list.", owner, repo), MB_OK | MB_ICONINFORMATION);
+        let (owner, repo) = split_path(&pref.segs);
+        let shown = if pref.host.is_empty() { format!("{}/{}", owner, repo) } else { format!("{}/{}/{}", host_label(&pref.host), owner, repo) };
+        if self.data.borrow().projects.iter().any(|p| project_key(p) == shown.to_lowercase()) {
+            message_box(hwnd, &format!("{} is already in the list.", shown), MB_OK | MB_ICONINFORMATION);
             return;
         }
         let token = self.token();
-        self.set_busy(true, Some(&format!("Adding {}/{} ...", owner, repo)));
+        self.set_busy(true, Some(&format!("Adding {} ...", shown)));
         let net = self.net.clone();
         let target = hwnd as usize;
         std::thread::spawn(move || {
+            if !pref.host.is_empty() {
+                // another host: public repositories only, official releases only
+                let result = resolve_project(&*net, &pref.host, pref.kind.as_deref(), &pref.segs, true).map_err(|e| e.to_string());
+                post_job(target, Job::Added(result.map(|(info, latest)| (info, Some(latest)))));
+                return;
+            }
             let result = (|| {
                 let latest = get_latest(&*net, &owner, &repo, &token, true).map_err(|e| e.to_string());
                 let info = match fetch_repo_info(&*net, &owner, &repo, &token) {
                     Ok(i) => i,
                     Err(GitHubError::NotFound(m)) => return Err(m),
                     // API unavailable (e.g. rate-limited): the release feed is enough.
-                    Err(_) => RepoInfo { owner: owner.clone(), repo: repo.clone(), title: repo.clone(), description: String::new(), html_url: format!("https://github.com/{}/{}", owner, repo) },
+                    Err(_) => RepoInfo { owner: owner.clone(), repo: repo.clone(), title: repo.clone(), description: String::new(), html_url: format!("https://github.com/{}/{}", owner, repo), host: None, kind: None },
                 };
                 Ok((info, latest?))
             })();
@@ -863,7 +874,13 @@ impl App {
         if self.busy.get() {
             return;
         }
-        let snapshot: Vec<(String, String, bool)> = self.data.borrow().projects.iter().map(|p| (p.owner.clone(), p.repo.clone(), p.include_prereleases)).collect();
+        let snapshot: Vec<(String, Option<String>, String, String, bool, String)> = self
+            .data
+            .borrow()
+            .projects
+            .iter()
+            .map(|p| (p.host.clone().unwrap_or_default(), p.kind.clone(), p.owner.clone(), p.repo.clone(), p.include_prereleases, project_key(p)))
+            .collect();
         if snapshot.is_empty() {
             self.set_status("Nothing to check - add a project first.");
             return;
@@ -874,9 +891,8 @@ impl App {
         let target = self.hwnd.get() as usize;
         std::thread::spawn(move || {
             let mut results = Vec::new();
-            for (owner, repo, inc) in snapshot {
-                let key = format!("{}/{}", owner, repo).to_lowercase();
-                match get_latest(&*net, &owner, &repo, &token, inc) {
+            for (host, kind, owner, repo, inc, key) in snapshot {
+                match fetch_latest_for(&*net, &host, kind.as_deref(), &owner, &repo, &token, inc) {
                     Ok(r) => results.push((key, r, None)),
                     Err(GitHubError::RateLimit(m)) => {
                         results.push((key, None, Some(m)));
@@ -898,7 +914,7 @@ impl App {
             }
             Job::Added(Ok((info, latest))) => {
                 let mut p = Project {
-                    owner: info.owner, repo: info.repo, title: info.title, description: info.description, html_url: info.html_url,
+                    owner: info.owner, repo: info.repo, host: info.host, kind: info.kind, title: info.title, description: info.description, html_url: info.html_url,
                     include_prereleases: true, // "whatever is newest", as on the Releases page
                     fmt: Some(2),
                     // Baseline: the release that exists now counts as already seen.
@@ -989,15 +1005,14 @@ impl App {
         match self.first_selected() {
             None => self.set_status("Select a project first."),
             Some(p) => {
-                let fallback = format!("https://github.com/{}/{}/releases", p.owner, p.repo);
-                shell_open(&safe_github_url(p.latest.as_ref().map(|l| l.url.as_str()), &fallback));
+                shell_open(&safe_url(p.latest.as_ref().map(|l| l.url.as_str()), &project_base(&p), &release_page(&p)));
             }
         }
     }
 
     fn open_repo(&self) {
         if let Some(p) = self.first_selected() {
-            shell_open(&safe_github_url(Some(&p.html_url), &format!("https://github.com/{}/{}", p.owner, p.repo)));
+            shell_open(&safe_url(Some(&p.html_url), &project_base(&p), &repo_page(&p)));
         }
     }
 

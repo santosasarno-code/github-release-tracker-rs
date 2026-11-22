@@ -1,6 +1,6 @@
 # GitHub Release Tracker (edisi Rust)
 
-Aplikasi Windows kecil dan portabel untuk memantau rilis terbaru dari proyek GitHub yang kamu ikuti, dan memberi tahu saat ada rilis baru. Tanpa akun, tanpa login, tanpa token.
+Aplikasi Windows kecil dan portabel untuk memantau rilis terbaru dari proyek yang kamu ikuti (GitHub, GitLab, Codeberg, Gitea / Forgejo, dan server self-hosted), dan memberi tahu saat ada rilis baru. Tanpa akun, tanpa login, tanpa token.
 
 > **Catatan rewrite:** proyek ini adalah tulis ulang total, dengan Rust dan antarmuka Win32 native, dari aplikasi Python / tkinter saya sebelumnya: **[github-release-tracker](https://github.com/santosasarno-code/github-release-tracker)**. Fiturnya sama dan memakai `projects.json` yang sama, jadi kamu bisa berpindah antar keduanya tanpa kehilangan daftar. Versi Python tetap tersedia.
 
@@ -11,6 +11,7 @@ Berupa satu `.exe` kecil tanpa instalasi.
 ## Fitur
 
 - Tambah proyek dengan menempel URL GitHub atau `owner/repo`
+- **Host lain, caranya sama.** Tempel URL proyek di **GitLab** (`gitlab.com` atau server sendiri, termasuk grup dan subgrup), **Codeberg**, **Gitea**, **Forgejo**, atau server self-hosted dari semuanya. Hanya repo publik, tanpa token. Hanya **rilis resmi** yang dipantau: proyek yang hanya punya tag (atau belum punya apa-apa) ditolak saat ditambahkan
 - Lihat nama proyek, repositori, rilis saat ini, tanggal terbit, dan status sekaligus
 - **Check for updates** menyegarkan semua proyek; rilis yang lebih baru ditandai `Update available: v1.0 -> v1.1`
 - **Mark as seen** menghapus tanda setelah kamu selesai dengan pembaruan itu
@@ -48,7 +49,11 @@ Manual: `cargo test --lib` menjalankan tes logika, `cargo build --release` mengh
 ## Pengaturan dan data
 
 - `projects.json` kompatibel dengan versi Python di kedua arah (nama kustom diabaikan oleh versi Python lebih lama dari 1.1.0).
-- Token GitHub opsional (Settings) disimpan sebagai teks biasa di `projects.json` dan tidak pernah diekspor. Pemakaian biasa tidak membutuhkannya: rilis dibaca dari feed publik GitHub.
+- Token GitHub opsional (Settings) disimpan sebagai teks biasa di `projects.json` dan tidak pernah diekspor. Pemakaian biasa tidak membutuhkannya: rilis dibaca dari feed publik GitHub. Token hanya dikirim ke `github.com`, tidak pernah ke host lain.
+- Proyek di host lain dibaca lewat API publik host itu (GitLab: `/api/v4/projects/<path>/releases`, Gitea / Forgejo / Codeberg: `/api/v1/repos/<owner>/<repo>/releases`). Rilis draf dan rilis "upcoming" GitLab diabaikan. Untuk server yang tidak dikenal, aplikasi mencoba API Gitea / Forgejo dulu lalu GitLab, satu kali, saat proyek ditambahkan. Token tidak pernah dikirim ke host ini (token GitHub opsional hanya dipakai untuk `github.com`).
+- Tautan yang tersimpan di data kamu hanya dibuka jika mengarah ke host proyek itu sendiri.
+- Host lain: hanya repo publik (tanpa token), hanya rilis resmi (bukan tag saja), dan GitLab tidak punya penanda pre-release. Server self-hosted dengan sertifikat yang tidak dipercaya Windows ditolak (aplikasi tidak pernah mematikan pemeriksaan sertifikat). Alamat `http://` hanya dipakai kalau kamu mengetiknya.
+- Versi lama (sebelum ini) tidak memahami proyek dari host lain: proyek itu dilewati saat membaca `projects.json` dan hilang saat menyimpan. Pakai versi baru di semua tempat yang berbagi file itu.
 
 ## Lisensi
 
