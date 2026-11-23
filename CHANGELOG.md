@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.3.0] - 2026-11-22
+- New **Source** column after Repository: GitHub, GitLab, Codeberg, or the address of your own server. Click the header to sort (GitHub, GitLab, Codeberg, then other servers A-Z; names A-Z inside each group). The search box matches the source too (type `gitlab`).
+- The **Repository** column now shows `owner/repo` only; the host moved to Source. It sorts by what it shows. The **Project** column is unchanged.
+- **Ctrl+A** in the list selects every listed project (a filter limits it). Before, it did nothing.
+- Fix: the repository link in the About window was cut off. The window now widens to fit the address, at any display scale.
+- New "Keyboard and mouse" section in the README (English and Bahasa Indonesia).
+- Your `projects.json` is unchanged; nothing new is saved.
+
+## [2.2.0] - 2026-11-22
+- **Search and filter.** A *Filter* row sits above the list: type to show only projects whose name or repository contains every word you typed (any case), and/or choose *Show:* All projects, Updates available, Errors, Up to date or No releases from the drop-down. Ctrl+F jumps to the box, Esc (or *Clear*) resets it, and it shows "n of m". Only the view changes; nothing is removed or saved differently. Adding a project clears the filter so the new row is visible.
+- The project limit is now 2000 (was 500). Before, extra entries in `projects.json` were dropped when the file was read; adding past the limit now says the list is full.
+- Not done yet: user-defined tags, and keeping several entries for the same repository (duplicates are still merged into one).
+- Not tested on real Windows when this was written: the new row's layout, dark mode and Ctrl+F / Esc keys. The filter logic itself is covered by unit tests.
+
 ## [2.1.0] - 2026-11-22
 - Track projects on other hosts: **GitLab** (gitlab.com or your own server, with groups and subgroups), **Codeberg**, **Gitea**, **Forgejo** and self-hosted servers of those. Paste the project URL like a GitHub one; `owner/repo` still means GitHub.
 - Public repositories only, no token, and only official releases: a project with just tags (or no release yet) is refused when you add it. The optional GitHub token is sent to `github.com` only.

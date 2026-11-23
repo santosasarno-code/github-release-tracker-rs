@@ -153,24 +153,30 @@ unsafe fn run_modal_keep(parent: HWND, dlg: HWND, st: &Dlg, app: &App, _edit: HW
 pub fn show_about(app: &App, parent: HWND) {
     unsafe {
         let st = Dlg { app, done: Cell::new(false), save: Cell::new(false), brush: Cell::new(null_mut()), field: Cell::new(null_mut()) };
-        let dlg = make_dialog(app, parent, &format!("About {}", APP_NAME), 430, 212, &st);
+        // The address is long: measure it (font and DPI as they are now) and widen the window if needed.
+        let hdc = GetDC(parent);
+        let url_px = app.text_width(hdc, REPO_URL);
+        ReleaseDC(parent, hdc);
+        let cw = (80 + url_px * 96 / app.dpi.get() as i32 + 8 + 16).max(430);
+        let inner = cw - 80 - 16;
+        let dlg = make_dialog(app, parent, &format!("About {}", APP_NAME), cw, 212, &st);
         if dlg.is_null() {
             return;
         }
         let icon = child(dlg, app, "STATIC", "", SS_ICON as u32, 0, ID_ICON, 16, 16, 48, 48);
         let hicon = LoadImageW(app.hinst, 1 as *const u16, IMAGE_ICON, app.s(48), app.s(48), LR_DEFAULTCOLOR);
         SendMessageW(icon, STM_SETIMAGE, IMAGE_ICON as usize, hicon as isize);
-        let head = child(dlg, app, "STATIC", APP_NAME, SS_LEFT as u32, 0, ID_HEAD, 80, 14, 336, 26);
+        let head = child(dlg, app, "STATIC", APP_NAME, SS_LEFT as u32, 0, ID_HEAD, 80, 14, inner, 26);
         SendMessageW(head, WM_SETFONT, make_font("Segoe UI", 14, 700, app.dpi.get()) as usize, 1);
-        child(dlg, app, "STATIC", &format!("Version {}", APP_VERSION), SS_LEFT as u32, 0, 410, 80, 42, 336, 18);
+        child(dlg, app, "STATIC", &format!("Version {}", APP_VERSION), SS_LEFT as u32, 0, 410, 80, 42, inner, 18);
         child(
             dlg, app, "STATIC",
             "Tracks the latest release of the projects you follow on GitHub, GitLab, Codeberg and other Git servers. No account, login or token needed. MIT License.",
-            SS_LEFT as u32, 0, ID_NOTE, 80, 66, 336, 54,
+            SS_LEFT as u32, 0, ID_NOTE, 80, 66, inner, 54,
         );
-        child(dlg, app, "STATIC", REPO_URL, SS_LEFT as u32 | SS_NOTIFY as u32, 0, ID_LINK, 80, 124, 336, 18);
-        child(dlg, app, "BUTTON", "Copy version", WS_TABSTOP | BS_PUSHBUTTON as u32, 0, ID_COPYVER, 430 - 16 - 84 - 8 - 96, 168, 96, 28);
-        child(dlg, app, "BUTTON", "Close", WS_TABSTOP | BS_DEFPUSHBUTTON as u32, 0, ID_CLOSE, 430 - 16 - 84, 168, 84, 28);
+        child(dlg, app, "STATIC", REPO_URL, SS_LEFT as u32 | SS_NOTIFY as u32, 0, ID_LINK, 80, 124, inner, 18);
+        child(dlg, app, "BUTTON", "Copy version", WS_TABSTOP | BS_PUSHBUTTON as u32, 0, ID_COPYVER, cw - 16 - 84 - 8 - 96, 168, 96, 28);
+        child(dlg, app, "BUTTON", "Close", WS_TABSTOP | BS_DEFPUSHBUTTON as u32, 0, ID_CLOSE, cw - 16 - 84, 168, 84, 28);
         run_modal(parent, dlg, &st, app);
     }
 }

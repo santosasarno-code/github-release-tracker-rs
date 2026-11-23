@@ -13,10 +13,10 @@ pub const APP_NAME: &str = "GitHub Release Tracker";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const REPO_URL: &str = "https://github.com/santosasarno-code/github-release-tracker-rs";
 pub const NO_DESCRIPTION: &str = "No description, website, or topics provided.";
-pub const MAX_PROJECTS: usize = 500;
+pub const MAX_PROJECTS: usize = 2000;
 pub const MAX_IMPORT_BYTES: u64 = 5 * 1024 * 1024;
 pub const MAX_CUSTOM_NAME: usize = 80;
-pub const SORTABLE: [&str; 4] = ["name", "repo", "published", "status"];
+pub const SORTABLE: [&str; 5] = ["name", "repo", "source", "published", "status"];
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -303,6 +303,34 @@ pub fn repo_label(p: &Project) -> String {
     }
 }
 
+/// What the Repository column shows: owner/repo (the host is in the Source column).
+pub fn repo_path(p: &Project) -> String {
+    format!("{}/{}", p.owner, p.repo)
+}
+
+/// Where the project lives: GitHub, GitLab, Codeberg, or the server's own address.
+pub fn source_label(p: &Project) -> String {
+    match host_of(p) {
+        None => "GitHub".to_string(),
+        Some(h) => {
+            let shown = host_label(h);
+            match shown.to_lowercase().as_str() {
+                "github.com" => "GitHub".to_string(),
+                "gitlab.com" => "GitLab".to_string(),
+                "codeberg.org" => "Codeberg".to_string(),
+                _ => shown.to_string(),
+            }
+        }
+    }
+}
+
+/// Order of the Source column: GitHub, GitLab, Codeberg, then other servers A-Z.
+fn source_key(p: &Project) -> (usize, String) {
+    let name = source_label(p);
+    let rank = ["GitHub", "GitLab", "Codeberg"].iter().position(|n| *n == name).unwrap_or(3);
+    (rank, name.to_lowercase())
+}
+
 pub fn display_name(p: &Project) -> String {
     if let Some(c) = &p.custom_name {
         if !c.is_empty() {
@@ -349,6 +377,54 @@ pub fn status_rank(p: &Project) -> i32 {
     } else {
         3
     }
+}
+
+/// "error", "update", "none" (no releases) or "ok": the same split that colours the rows.
+pub fn status_kind(p: &Project) -> &'static str {
+    if p.error.is_some() {
+        "error"
+    } else if has_update(p) {
+        "update"
+    } else if p.latest.is_none() {
+        "none"
+    } else {
+        "ok"
+    }
+}
+
+/// Choices of the status filter: (value, menu text). "all" shows everything.
+pub const STATUS_FILTERS: [(&str, &str); 5] = [
+    ("all", "All projects"),
+    ("update", "Updates available"),
+    ("error", "Errors"),
+    ("ok", "Up to date"),
+    ("none", "No releases"),
+];
+
+/// Menu text of a status filter value ("All projects" for anything unknown).
+pub fn status_filter_text(kind: &str) -> &'static str {
+    STATUS_FILTERS.iter().find(|f| f.0 == kind).map_or(STATUS_FILTERS[0].1, |f| f.1)
+}
+
+/// Which projects (by index, in their current order) match the search text and the status
+/// filter. Every word of the search text must appear (any case) in the project name or the
+/// repository address, so "emu rom" finds "Emu Roms" and "owner/emu-roms". Only decides what is
+/// shown; nothing is changed.
+pub fn filter_matches(projects: &[Project], query: &str, kind: &str) -> Vec<bool> {
+    let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
+    projects
+        .iter()
+        .map(|p| {
+            if kind != "all" && status_kind(p) != kind {
+                return false;
+            }
+            if terms.is_empty() {
+                return true;
+            }
+            let hay = format!("{} {} {}", display_name(p), repo_label(p), source_label(p)).to_lowercase();
+            terms.iter().all(|t| hay.contains(t.as_str()))
+        })
+        .collect()
 }
 
 /// Text of the "Current release" cell.
@@ -607,7 +683,20 @@ pub fn sort_order(projects: &[Project], col: &str, asc: bool) -> Vec<usize> {
             let (pa, pb) = (&projects[a], &projects[b]);
             dir((title_key(pa), project_key(pa)).cmp(&(title_key(pb), project_key(pb))))
         }),
-        "repo" => idx.sort_by(|&a, &b| dir(project_key(&projects[a]).cmp(&project_key(&projects[b])))),
+        // what the column shows (owner/repo); the full key only breaks ties
+        "repo" => idx.sort_by(|&a, &b| {
+            let (pa, pb) = (&projects[a], &projects[b]);
+            dir((repo_path(pa).to_lowercase(), project_key(pa)).cmp(&(repo_path(pb).to_lowercase(), project_key(pb))))
+        }),
+        // GitHub, GitLab, Codeberg, then other servers A-Z. Same source: A-Z by name in either
+        // direction (the second sort is stable, so the name order is kept).
+        "source" => {
+            idx.sort_by(|&a, &b| {
+                let (pa, pb) = (&projects[a], &projects[b]);
+                (title_key(pa), project_key(pa)).cmp(&(title_key(pb), project_key(pb)))
+            });
+            idx.sort_by(|&a, &b| dir(source_key(&projects[a]).cmp(&source_key(&projects[b]))));
+        }
         "published" => {
             let (mut dated, mut undated): (Vec<usize>, Vec<usize>) = idx.into_iter().partition(|&i| !published(&projects[i]).is_empty());
             dated.sort_by(|&a, &b| {
@@ -1120,12 +1209,12 @@ pub fn fetch_latest_for(net: &dyn Net, host: &str, kind: Option<&str>, owner: &s
 // ---------------------------------------------------------------------------
 // Column layout (pixels at 96 DPI; the GUI scales them)
 // ---------------------------------------------------------------------------
-pub const COL_BASE: [i32; 6] = [230, 280, 150, 125, 260, 140];
-pub const COL_MIN: [i32; 6] = [120, 120, 90, 115, 120, 110];
+pub const COL_BASE: [i32; 7] = [230, 250, 125, 150, 125, 260, 140];
+pub const COL_MIN: [i32; 7] = [120, 120, 95, 90, 115, 120, 110];
 
 /// Column widths for `avail` pixels, proportional to the preferred widths. Wider than the preferred
 /// total: all grow by the same ratio; narrower: each shrinks toward its minimum at the same rate.
-/// The rounding remainder goes to the Status column (index 4).
+/// The rounding remainder goes to the Status column (index 5).
 pub fn layout_columns(base: &[i32], low: &[i32], avail: i32) -> Vec<i32> {
     let total_pref: i32 = base.iter().sum();
     let total_low: i32 = low.iter().sum();
@@ -1136,9 +1225,9 @@ pub fn layout_columns(base: &[i32], low: &[i32], avail: i32) -> Vec<i32> {
         base.iter().zip(low).map(|(&p, &lo)| lo as f64 + (p - lo) as f64 * t).collect()
     };
     let mut sizes: Vec<i32> = target.iter().zip(low).map(|(&x, &lo)| (x as i32).max(lo)).collect();
-    if avail >= total_low && sizes.len() > 4 {
+    if avail >= total_low && sizes.len() > 5 {
         let sum: i32 = sizes.iter().sum();
-        sizes[4] += (avail - sum).max(0);
+        sizes[5] += (avail - sum).max(0);
     }
     sizes
 }

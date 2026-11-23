@@ -17,7 +17,9 @@ It ships as one small `.exe` with nothing to install.
 - **Mark as seen** clears the highlight once you have dealt with an update
 - Double-click a project row (or use **Open release page**) to open its release page in your browser; double-clicking the **Project** name renames it instead
 - **Rename** a project: click the pencil that appears when you hover it, or select it and press **F2**, or right-click > Rename, or double-click the name. *Reset name* brings the GitHub name back
-- Click the **Project**, **Repository**, **Published** or **Status** header to sort (click again to reverse)
+- Click the **Project**, **Repository**, **Source**, **Published** or **Status** header to sort (click again to reverse)
+- The **Source** column tells where each project lives (GitHub, GitLab, Codeberg, or your own server's address); click its header to sort by it. The search box matches it too.
+- **Filter** the list: type in the search box (Ctrl+F jumps there, Esc clears it) to show only projects whose name or repository contains every word you typed, and/or pick *Show:* All projects / Updates available / Errors / Up to date / No releases. It only changes what is listed; nothing is removed or saved differently. The box shows "n of m".
 - **Import / Export** the list as `.json` (merge or replace on import; the token is never exported)
 - **Light / dark** mode: click the moon / sun icon at the bottom right (starts with your Windows theme)
 - Columns resize in proportion when you resize the window; drag a column border to change the proportions
@@ -25,6 +27,46 @@ It ships as one small `.exe` with nothing to install.
 - Portable: one `.exe`, no installer, no registry entries. Data is `projects.json` next to the exe (falls back to `%APPDATA%\GitHubReleaseTracker` if that folder is read-only)
 
 The app only reads release information. It never downloads or installs anything.
+
+## Keyboard and mouse
+
+### Adding and filtering
+| Action | How |
+|---|---|
+| Add the project in the top box | **Enter**, or the *Add project* button |
+| Jump to the Filter box | **Ctrl+F** |
+| Clear the filter (text and status) | **Esc** in the Filter box, or the *Clear* button |
+
+### Selecting projects
+| Action | How |
+|---|---|
+| Select one | Click a row |
+| Add or remove one row from the selection | **Ctrl+click** |
+| Select a range | **Shift+click**, or **Shift+Up / Down** |
+| Jump to the first / last project | **Home** / **End** |
+| Move the selection | **Up / Down** |
+| Select every listed project | **Ctrl+A** |
+
+Only the rows you can see are selected, so with a filter on, *Remove* and *Mark as seen* act on those rows only.
+
+### Working with projects
+| Action | How |
+|---|---|
+| Rename the selected project | **F2**, or double-click the **Project** name, or the pencil that appears when you hover a row, or right-click > Rename |
+| Save / cancel a rename | **Enter** / **Esc** |
+| Open the release page | Double-click any column except **Project**, or *Open release page* |
+| Remove the selected projects | **Delete**, or *Remove* (always asks first) |
+| Row menu | **Right-click** a row: Open release page, Open repository, Mark as seen, Rename, Reset name, Include pre-releases, Remove. Right-clicking a row that is not selected selects it first |
+
+### The list and window
+| Action | How |
+|---|---|
+| Sort | Click the **Project**, **Repository**, **Source**, **Published** or **Status** header; click again to reverse |
+| Resize a column | Drag the border in the header |
+| Scroll | Mouse wheel |
+| Copy the status text | **Right-click** the status bar > Copy |
+| Text boxes | Right-click for Cut / Copy / Paste / Select all |
+| Switch dark / light | The moon / sun button at the bottom right |
 
 ## What you need
 

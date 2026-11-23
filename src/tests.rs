@@ -223,9 +223,9 @@ fn import_merge_export() {
     assert!(parse_import(&json!("x")).is_none());
     assert_eq!(parse_import(&json!(["x/y", "z/w"])).unwrap().0.len(), 2);
     // the cap
-    let many: Vec<Value> = (0..600).map(|i| json!(format!("o/r{}", i))).collect();
+    let many: Vec<Value> = (0..MAX_PROJECTS + 100).map(|i| json!(format!("o/r{}", i))).collect();
     let (l, s) = parse_import(&Value::Array(many)).unwrap();
-    assert_eq!((l.len(), s), (500, 100));
+    assert_eq!((l.len(), s), (MAX_PROJECTS, 100));
     // merge never overwrites an existing repo (so custom names of new files are not applied to existing entries)
     let mut mine = vec![proj("a", "one")];
     let mut theirs = proj("A", "One");
@@ -308,13 +308,13 @@ fn labels() {
 fn column_layout_fills_the_width() {
     for avail in [700, 1000, 1066, 1200, 1400, 1900] {
         let w = layout_columns(&COL_BASE, &COL_MIN, avail);
-        assert_eq!(w.len(), 6);
+        assert_eq!(w.len(), COL_BASE.len());
         assert!(w.iter().zip(COL_MIN).all(|(&a, m)| a >= m), "{:?}", w);
         if avail >= COL_MIN.iter().sum::<i32>() {
             assert_eq!(w.iter().sum::<i32>(), avail, "avail {} -> {:?}", avail, w);
         }
     }
-    let w = layout_columns(&COL_BASE, &COL_MIN, 1185); // preferred total
+    let w = layout_columns(&COL_BASE, &COL_MIN, COL_BASE.iter().sum()); // preferred total
     assert_eq!(w, COL_BASE.to_vec());
 }
 
@@ -451,4 +451,145 @@ fn other_host_projects_storage_and_compat() {
     assert_eq!((imp.len(), skipped), (3, 2));
     let (again, _) = parse_import(&build_export(&imp, "2026-11-22T00:00:00")).unwrap();
     assert_eq!(again.iter().map(project_key).collect::<Vec<_>>(), imp.iter().map(project_key).collect::<Vec<_>>());
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    fn proj(owner: &str, repo: &str, custom: Option<&str>, release: Option<&str>, seen: Option<&str>, err: Option<&str>) -> Project {
+        let mut p = super::proj(owner, repo);
+        p.title = repo.to_string();
+        p.custom_name = custom.map(|c| c.to_string());
+        p.latest = release.map(|r| Release { id: Id::Str(r.to_string()), tag: r.to_string(), name: r.to_string(), published_at: String::new(), url: String::new(), prerelease: false, source: "release".into() });
+        p.seen_id = seen.map(|s| Id::Str(s.to_string()));
+        p.error = err.map(|e| e.to_string());
+        p
+    }
+
+    fn sample() -> Vec<Project> {
+        vec![
+            proj("a", "emu-roms", None, Some("v1"), Some("v1"), None),
+            proj("b", "tool", None, Some("v2"), Some("v1"), None),
+            proj("c", "broken", None, None, None, Some("boom")),
+            proj("d", "empty", None, None, None, None),
+            proj("Zed", "Game-Launcher", Some("My Launcher"), Some("v3"), Some("v3"), None),
+        ]
+    }
+
+    fn names(ps: &[Project], q: &str, k: &str) -> Vec<String> {
+        let m = filter_matches(ps, q, k);
+        ps.iter().zip(m).filter(|(_, ok)| *ok).map(|(p, _)| p.repo.clone()).collect()
+    }
+
+    #[test]
+    fn status_kinds() {
+        let ps = sample();
+        let k: Vec<&str> = ps.iter().map(status_kind).collect();
+        assert_eq!(k, ["ok", "update", "error", "none", "ok"]);
+    }
+
+    #[test]
+    fn text_search_is_case_insensitive_and_needs_every_word() {
+        let ps = sample();
+        assert_eq!(names(&ps, "", "all").len(), 5);
+        assert_eq!(names(&ps, "   ", "all").len(), 5);
+        assert_eq!(names(&ps, "EMU", "all"), ["emu-roms"]);
+        assert_eq!(names(&ps, "emu roms", "all"), ["emu-roms"]);
+        assert_eq!(names(&ps, "roms emu", "all"), ["emu-roms"]);
+        assert_eq!(names(&ps, "zed/game", "all"), ["Game-Launcher"]); // owner/repo address
+        assert_eq!(names(&ps, "my launcher", "all"), ["Game-Launcher"]); // custom display name
+        assert!(names(&ps, "nomatch", "all").is_empty());
+        assert!(names(&ps, "emu nomatch", "all").is_empty());
+    }
+
+    #[test]
+    fn status_filter_and_text_combine() {
+        let ps = sample();
+        assert_eq!(names(&ps, "", "update"), ["tool"]);
+        assert_eq!(names(&ps, "", "error"), ["broken"]);
+        assert_eq!(names(&ps, "", "none"), ["empty"]);
+        assert_eq!(names(&ps, "", "ok"), ["emu-roms", "Game-Launcher"]);
+        assert_eq!(names(&ps, "game", "ok"), ["Game-Launcher"]);
+        assert!(names(&ps, "game", "error").is_empty());
+        assert_eq!(status_filter_text("error"), "Errors");
+        assert_eq!(status_filter_text("???"), "All projects");
+    }
+
+    #[test]
+    fn limit_is_large_enough_for_hundreds_of_projects() {
+        assert!(MAX_PROJECTS >= 2000);
+        let items: Vec<serde_json::Value> = (0..1500).map(|i| serde_json::json!({"owner": "o", "repo": format!("r{}", i)})).collect();
+        let text = serde_json::json!({"projects": items}).to_string();
+        let d = parse_data(&text).unwrap();
+        assert_eq!(d.projects.len(), 1500);
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    fn mk(owner: &str, repo: &str, host: Option<&str>) -> Project {
+        let mut p = super::proj(owner, repo);
+        p.title = repo.to_string();
+        p.host = host.map(|h| h.to_string());
+        p.kind = host.map(|_| "gitea".to_string());
+        p
+    }
+
+    fn sample() -> Vec<Project> {
+        vec![
+            mk("o", "zeta", None),
+            mk("g", "alpha", Some("gitlab.com")),
+            mk("f", "forgejo", Some("codeberg.org")),
+            mk("t", "tool", Some("git.example.com")),
+            mk("a", "aaa", None),
+            mk("l", "local", Some("http://127.0.0.1:3000")),
+            mk("h", "up", Some("GitLab.com")),
+        ]
+    }
+
+    fn order(ps: &[Project], col: &str, asc: bool) -> Vec<String> {
+        sort_order(ps, col, asc).into_iter().map(|i| ps[i].repo.clone()).collect()
+    }
+
+    #[test]
+    fn source_labels() {
+        let l: Vec<String> = sample().iter().map(source_label).collect();
+        assert_eq!(l, ["GitHub", "GitLab", "Codeberg", "git.example.com", "GitHub", "127.0.0.1:3000", "GitLab"]);
+        assert_eq!(repo_path(&sample()[1]), "g/alpha"); // no host in the Repository column
+    }
+
+    #[test]
+    fn source_sort_groups_then_names() {
+        let ps = sample();
+        assert!(SORTABLE.contains(&"source"));
+        assert_eq!(order(&ps, "source", true), ["aaa", "zeta", "alpha", "up", "forgejo", "local", "tool"]);
+        // reversed: the groups flip, the names inside a group stay A-Z
+        assert_eq!(order(&ps, "source", false), ["tool", "local", "forgejo", "alpha", "up", "aaa", "zeta"]);
+        // the Repository column sorts by what it shows
+        let by_repo: Vec<String> = sort_order(&ps, "repo", true).into_iter().map(|i| repo_path(&ps[i])).collect();
+        let mut want: Vec<String> = ps.iter().map(repo_path).collect();
+        want.sort_by_key(|s| s.to_lowercase());
+        assert_eq!(by_repo, want);
+    }
+
+    #[test]
+    fn search_matches_the_source() {
+        let ps = sample();
+        let names = |q: &str| -> Vec<String> {
+            let m = filter_matches(&ps, q, "all");
+            ps.iter().zip(m).filter(|(_, ok)| *ok).map(|(p, _)| p.repo.clone()).collect()
+        };
+        assert_eq!(names("gitlab"), ["alpha", "up"]);
+        assert_eq!(names("codeberg"), ["forgejo"]);
+        assert_eq!(names("github"), ["zeta", "aaa"]);
+    }
+
+    #[test]
+    fn unknown_saved_sort_column_falls_back() {
+        let d = parse_data(r#"{"settings":{"sort_col":"bogus"},"projects":[]}"#).unwrap();
+        assert_eq!(d.settings.sort_col, "");
+    }
 }

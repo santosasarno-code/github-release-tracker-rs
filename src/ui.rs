@@ -36,7 +36,14 @@ pub const ID_LIST: i32 = 111;
 pub const ID_STATUS: i32 = 112;
 pub const ID_LABEL: i32 = 113;
 pub const ID_PENCIL: i32 = 114;
+pub const ID_FLABEL: i32 = 115;
+pub const ID_FILTER: i32 = 116;
+pub const ID_FKIND: i32 = 117;
+pub const ID_FCLEAR: i32 = 118;
+pub const ID_FCOUNT: i32 = 119;
 const TIMER_PENCIL: usize = 77;
+const TIMER_FILTER: usize = 78;
+const M_KIND: u32 = 300; // 301..=305 pick a status filter
 const G_EDIT: u16 = 0xE70F;
 // popup menu ids
 const M_OPEN: u32 = 201;
@@ -54,9 +61,10 @@ const WM_RENAMED: u32 = WM_APP + 3;
 const WM_TRACKED: u32 = WM_APP + 4;
 const WM_STARTUP: u32 = WM_APP + 5;
 
-const COLS: [(&str, &str); 6] = [
+const COLS: [(&str, &str); 7] = [
     ("name", "Project"),
     ("repo", "Repository"),
+    ("source", "Source"),
     ("release", "Current release"),
     ("published", "Published"),
     ("status", "Status"),
@@ -74,6 +82,8 @@ const G_IMPORT: u16 = 0xE896;
 const G_EXPORT: u16 = 0xE898;
 const G_MOON: u16 = 0xE708;
 const G_SUN: u16 = 0xE706;
+const G_FILTER: u16 = 0xE71C;
+const G_CLEAR: u16 = 0xE894;
 
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -117,6 +127,9 @@ pub fn palette(dark: bool) -> Palette {
 struct Ctl {
     label: HWND,
     entry: HWND,
+    flabel: HWND,
+    filter: HWND,
+    fcount: HWND,
     list: HWND,
     header: HWND,
     status: HWND,
@@ -164,10 +177,12 @@ pub struct App {
     pencil: Cell<HWND>,
     pencil_row: Cell<isize>,
     entry_frame: Cell<RECT>,
+    filter_frame: Cell<RECT>,
+    filter_kind: RefCell<String>,
 }
 
 fn null_ctl() -> Ctl {
-    Ctl { label: null_mut(), entry: null_mut(), list: null_mut(), header: null_mut(), status: null_mut(), tip: null_mut() }
+    Ctl { label: null_mut(), entry: null_mut(), flabel: null_mut(), filter: null_mut(), fcount: null_mut(), list: null_mut(), header: null_mut(), status: null_mut(), tip: null_mut() }
 }
 
 fn data_file() -> PathBuf {
@@ -269,6 +284,8 @@ impl App {
             pencil: Cell::new(null_mut()),
             pencil_row: Cell::new(-1),
             entry_frame: Cell::new(RECT { left: 0, top: 0, right: 0, bottom: 0 }),
+            filter_frame: Cell::new(RECT { left: 0, top: 0, right: 0, bottom: 0 }),
+            filter_kind: RefCell::new("all".to_string()),
         }
     }
 
@@ -337,6 +354,11 @@ impl App {
                 return false;
             }
             if msg.hwnd == main || IsChild(main, msg.hwnd) != 0 {
+                if msg.message == WM_KEYDOWN && msg.wParam == 'F' as usize && GetKeyState(VK_CONTROL as i32) < 0 {
+                    SetFocus(ctl.filter);
+                    SendMessageW(ctl.filter, EM_SETSEL, 0, -1);
+                    return true;
+                }
                 return IsDialogMessageW(main, msg) != 0;
             }
             false
@@ -355,6 +377,9 @@ impl App {
             };
             let label = mk("STATIC", "Project (repo URL or owner/repo):", SS_LEFT as u32 | SS_CENTERIMAGE as u32, 0, ID_LABEL);
             let entry = mk("EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL as u32, 0, ID_ENTRY);
+            let flabel = mk("STATIC", "Filter:", SS_LEFT as u32 | SS_CENTERIMAGE as u32, 0, ID_FLABEL);
+            let filter = mk("EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL as u32, 0, ID_FILTER);
+            let fcount = mk("STATIC", "", 0x2u32 /* SS_RIGHT */ | SS_CENTERIMAGE as u32, 0, ID_FCOUNT);
             for (id, glyph, text) in BUTTONS {
                 let _ = glyph;
                 mk("BUTTON", text, WS_TABSTOP | BS_OWNERDRAW as u32, 0, id);
@@ -371,7 +396,7 @@ impl App {
             );
             SendMessageW(list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP) as isize);
             let header = SendMessageW(list, LVM_GETHEADER, 0, 0) as HWND;
-            self.ctl.set(Ctl { label, entry, list, header, status, tip });
+            self.ctl.set(Ctl { label, entry, flabel, filter, fcount, list, header, status, tip });
             for (i, (_, title)) in COLS.iter().enumerate() {
                 let mut text = w(title);
                 let mut col: LVCOLUMNW = std::mem::zeroed();
@@ -382,6 +407,7 @@ impl App {
                 SendMessageW(list, LVM_INSERTCOLUMNW, i, &col as *const LVCOLUMNW as isize);
             }
             SendMessageW(entry, EM_SETLIMIT, 300, 0);
+            SendMessageW(filter, EM_SETLIMIT, 100, 0);
             // hover pencil (rename): a small owner-drawn button that floats over the list
             let pencil = mk("BUTTON", "", BS_OWNERDRAW as u32 | WS_CLIPSIBLINGS, 0, ID_PENCIL);
             ShowWindow(pencil, SW_HIDE);
@@ -420,7 +446,7 @@ impl App {
     fn apply_fonts(&self) {
         unsafe {
             let (f, c) = (self.fonts.get(), self.ctl.get());
-            for h in [c.label, c.entry, c.list, c.status] {
+            for h in [c.label, c.entry, c.flabel, c.filter, c.fcount, c.list, c.status] {
                 SendMessageW(h, WM_SETFONT, f.ui as usize, 1);
             }
             // The list view hands its font to the header; set the bold one afterwards.
@@ -498,7 +524,7 @@ impl App {
         self.s(12 + 16 + 6 + 12) + self.text_width(hdc, text)
     }
 
-    fn text_width(&self, hdc: HDC, text: &str) -> i32 {
+    pub fn text_width(&self, hdc: HDC, text: &str) -> i32 {
         unsafe {
             let old = SelectObject(hdc, self.fonts.get().ui as HGDIOBJ);
             let t = w(text);
@@ -540,9 +566,13 @@ impl App {
             let hdc = GetDC(hwnd);
             let label_w = self.text_width(hdc, "Project (repo URL or owner/repo):") + self.s(4);
             let add_w = self.button_width(hdc, "Add project");
+            let flabel_w = self.text_width(hdc, "Filter:") + self.s(4);
+            let kind_w = self.button_width(hdc, "Show: Updates available");
+            let clear_w = self.button_width(hdc, "Clear");
+            let count_w = self.text_width(hdc, "0000 of 0000") + self.s(8);
             ReleaseDC(hwnd, hdc);
             // One batched move for every control: a single repaint pass instead of one per control.
-            let mut batch = BeginDeferWindowPos(16);
+            let mut batch = BeginDeferWindowPos(32);
             let mut mv = |h: HWND, x: i32, y: i32, w: i32, hh: i32| {
                 if !batch.is_null() {
                     batch = DeferWindowPos(batch, h, null_mut(), x, y, w.max(1), hh.max(1), SWP_NOZORDER | SWP_NOACTIVATE);
@@ -570,8 +600,20 @@ impl App {
                 mv(GetDlgItem(hwnd, id), x, y2, bw, btn_h);
                 x -= gap;
             }
+            // second row: search box, status filter, clear, "n of m"
+            let y3 = y2 + btn_h + self.s(6);
+            mv(c.flabel, m, y3, flabel_w, row_h);
+            let mut x = cw - m - count_w;
+            mv(c.fcount, x, y3, count_w, row_h);
+            x -= gap + clear_w;
+            mv(GetDlgItem(hwnd, ID_FCLEAR), x, y3, clear_w, row_h);
+            x -= gap + kind_w;
+            mv(GetDlgItem(hwnd, ID_FKIND), x, y3, kind_w, row_h);
+            let ff = RECT { left: m + flabel_w + gap, top: y3, right: (x - gap).max(m + flabel_w + gap + self.s(40)), bottom: y3 + row_h };
+            self.filter_frame.set(ff);
+            mv(c.filter, ff.left + self.s(8), ff.top + (row_h - th) / 2, ff.right - ff.left - 2 * self.s(8), th);
             let status_h = self.s(28);
-            let top = y2 + btn_h + self.s(8);
+            let top = y3 + row_h + self.s(8);
             mv(c.list, m, top, cw - 2 * m, ch - top - status_h - self.s(2));
             let tsz = self.s(28);
             mv(GetDlgItem(hwnd, ID_THEME), cw - m - tsz, ch - status_h + (status_h - tsz) / 2, tsz, tsz);
@@ -581,7 +623,7 @@ impl App {
             }
             // The rounded repo frame is painted by this window, so the old frame (a different width)
             // must be erased explicitly or stale white pieces stay behind while resizing.
-            let strip = RECT { left: 0, top: 0, right: cw, bottom: y2 + btn_h + self.s(4) };
+            let strip = RECT { left: 0, top: 0, right: cw, bottom: y3 + row_h + self.s(4) };
             RedrawWindow(hwnd, &strip, null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
             // A STATIC with an ellipsis only repaints the newly exposed part when it grows, which
             // garbles the text; repaint the whole control (and its background) every time.
@@ -680,6 +722,52 @@ impl App {
         self.view.borrow_mut().clear();
     }
 
+    /// What is typed in the search box.
+    fn filter_query(&self) -> String {
+        unsafe {
+            let e = self.ctl.get().filter;
+            let n = GetWindowTextLengthW(e) as usize;
+            let mut buf = vec![0u16; n + 2];
+            GetWindowTextW(e, buf.as_mut_ptr(), buf.len() as i32);
+            from_wide_buf(&buf)
+        }
+    }
+
+    fn filter_active(&self) -> bool {
+        !self.filter_query().trim().is_empty() || *self.filter_kind.borrow() != "all"
+    }
+
+    fn set_kind(&self, kind: &str) {
+        *self.filter_kind.borrow_mut() = kind.to_string();
+        unsafe { InvalidateRect(GetDlgItem(self.hwnd.get(), ID_FKIND), null(), 1) };
+        self.render();
+    }
+
+    fn clear_filter(&self) {
+        unsafe {
+            SetWindowTextW(self.ctl.get().filter, w("").as_ptr());
+            KillTimer(self.hwnd.get(), TIMER_FILTER);
+            InvalidateRect(GetDlgItem(self.hwnd.get(), ID_FKIND), null(), 1);
+        }
+        *self.filter_kind.borrow_mut() = "all".to_string();
+        self.render();
+    }
+
+    fn kind_menu(&self) {
+        unsafe {
+            let menu = CreatePopupMenu();
+            let cur = self.filter_kind.borrow().clone();
+            for (i, (value, text)) in STATUS_FILTERS.iter().enumerate() {
+                AppendMenuW(menu, MF_STRING | if *value == cur { MF_CHECKED } else { 0 }, M_KIND as usize + i + 1, w(text).as_ptr());
+            }
+            let mut rc: RECT = std::mem::zeroed();
+            GetWindowRect(GetDlgItem(self.hwnd.get(), ID_FKIND), &mut rc);
+            let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, rc.left, rc.bottom, 0, self.hwnd.get(), null());
+            DestroyMenu(menu);
+            self.run_menu_command(cmd as u32);
+        }
+    }
+
     pub fn render(&self) {
         unsafe {
             let c = self.ctl.get();
@@ -687,7 +775,13 @@ impl App {
             self.suppress.set(true);
             {
                 let data = self.data.borrow();
-                *self.view.borrow_mut() = sort_order(&data.projects, &self.sort_col.borrow(), self.sort_asc.get());
+                let shown = filter_matches(&data.projects, &self.filter_query(), &self.filter_kind.borrow());
+                let order = sort_order(&data.projects, &self.sort_col.borrow(), self.sort_asc.get());
+                let count = shown.iter().filter(|&&b| b).count();
+                let total = data.projects.len();
+                let text = if count != total { format!("{} of {}", count, total) } else { format!("{} project{}", total, if total == 1 { "" } else { "s" }) };
+                SetWindowTextW(c.fcount, w(&text).as_ptr());
+                *self.view.borrow_mut() = order.into_iter().filter(|&i| shown[i]).collect();
             }
             SendMessageW(c.list, LVM_SETITEMCOUNT, self.view.borrow().len(), LVSICF_NOSCROLL as isize);
             let mut st: LVITEMW = std::mem::zeroed();
@@ -717,10 +811,11 @@ impl App {
         };
         match col {
             0 => display_name(p),
-            1 => repo_label(p),
-            2 => release_label(p),
-            3 => published_label(p),
-            4 => status_text(p),
+            1 => repo_path(p),
+            2 => source_label(p),
+            3 => release_label(p),
+            4 => published_label(p),
+            5 => status_text(p),
             _ => checked_label(p),
         }
     }
@@ -845,6 +940,10 @@ impl App {
             message_box(hwnd, &format!("{} is already in the list.", shown), MB_OK | MB_ICONINFORMATION);
             return;
         }
+        if self.data.borrow().projects.len() >= MAX_PROJECTS {
+            message_box(hwnd, &format!("The list is full ({} projects).", MAX_PROJECTS), MB_OK | MB_ICONINFORMATION);
+            return;
+        }
         let token = self.token();
         self.set_busy(true, Some(&format!("Adding {} ...", shown)));
         let net = self.net.clone();
@@ -940,7 +1039,11 @@ impl App {
                 self.data.borrow_mut().projects.push(p);
                 self.persist();
                 unsafe { SetWindowTextW(self.ctl.get().entry, w("").as_ptr()) };
-                self.render();
+                if self.filter_active() {
+                    self.clear_filter(); // a filtered-out new project would look like it was not added
+                } else {
+                    self.render();
+                }
                 self.set_status(&msg);
             }
             Job::Checked { results, rate } => {
@@ -1202,6 +1305,7 @@ impl App {
             M_RESET => self.reset_names(),
             M_PRE => self.toggle_prerelease(),
             M_REMOVE => self.remove_selected(),
+            n if n > M_KIND && (n - M_KIND) as usize <= STATUS_FILTERS.len() => self.set_kind(STATUS_FILTERS[(n - M_KIND - 1) as usize].0),
             M_COPY => {
                 copy_to_clipboard(self.hwnd.get(), &self.status_text.borrow());
             }
@@ -1230,6 +1334,13 @@ impl App {
         let (_, glyph, text) = match BUTTONS.iter().find(|b| b.0 == id) {
             Some(b) => *b,
             None => return,
+        };
+        let kind_text;
+        let text: &str = if id == ID_FKIND {
+            kind_text = format!("Show: {}", status_filter_text(&self.filter_kind.borrow()));
+            &kind_text
+        } else {
+            text
         };
         let glyph = if id == ID_THEME { if self.dark.get() { G_SUN } else { G_MOON } } else { glyph };
         let disabled = dis.itemState & ODS_DISABLED != 0;
@@ -1640,6 +1751,18 @@ impl App {
                     self.remove_selected();
                 } else if k.wVKey == VK_F2 {
                     self.rename_selected();
+                } else if k.wVKey == b'A' as u16 && GetKeyState(VK_CONTROL as i32) < 0 {
+                    // Ctrl+A: select every listed project (a filter limits it); -1 = all items
+                    let mut st: LVITEMW = std::mem::zeroed();
+                    st.stateMask = LVIS_SELECTED;
+                    st.state = LVIS_SELECTED;
+                    SendMessageW(c.list, LVM_SETITEMSTATE, usize::MAX, &st as *const LVITEMW as isize);
+                } else if k.wVKey == 0x41 /* A */ && GetKeyState(VK_CONTROL as i32) < 0 {
+                    // Ctrl+A: select every listed row (the list view does not do this by itself)
+                    let mut st: LVITEMW = std::mem::zeroed();
+                    st.stateMask = LVIS_SELECTED;
+                    st.state = LVIS_SELECTED;
+                    SendMessageW(c.list, LVM_SETITEMSTATE, usize::MAX, &st as *const LVITEMW as isize);
                 }
                 0
             }
@@ -1684,6 +1807,21 @@ impl App {
                 if notify == EN_SETFOCUS as u32 || notify == EN_KILLFOCUS as u32 {
                     let fr = self.entry_frame.get();
                     InvalidateRect(self.hwnd.get(), &fr, 1);
+                }
+            }
+            ID_FILTER => {
+                if notify == EN_CHANGE as u32 {
+                    SetTimer(self.hwnd.get(), TIMER_FILTER, 150, None); // re-list shortly after the last keystroke
+                } else if notify == EN_SETFOCUS as u32 || notify == EN_KILLFOCUS as u32 {
+                    let fr = self.filter_frame.get();
+                    InvalidateRect(self.hwnd.get(), &fr, 1);
+                }
+            }
+            ID_FKIND => self.kind_menu(),
+            ID_FCLEAR => self.clear_filter(),
+            2 /* IDCANCEL: Esc */ => {
+                if GetFocus() == self.ctl.get().filter {
+                    self.clear_filter();
                 }
             }
             ID_EXPORT => self.export_json(),
@@ -1733,7 +1871,9 @@ fn post_job(target: usize, job: Job) {
     }
 }
 
-const BUTTONS: [(i32, u16, &str); 9] = [
+const BUTTONS: [(i32, u16, &str); 11] = [
+    (ID_FKIND, G_FILTER, ""),
+    (ID_FCLEAR, G_CLEAR, "Clear"),
     (ID_ADD, G_PLUS, "Add project"),
     (ID_CHECK, G_REFRESH, "Check for updates"),
     (ID_SEEN, G_EYE, "Mark as seen"),
@@ -1827,34 +1967,38 @@ pub unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             let mut rc: RECT = std::mem::zeroed();
             GetClientRect(hwnd, &mut rc);
             FillRect(wp as HDC, &rc, app.brushes.get().bg);
-            let fr = app.entry_frame.get();
-            if fr.right > fr.left {
-                let p = app.pal();
-                let focused = GetFocus() == app.ctl.get().entry;
-                let fill = CreateSolidBrush(p.field);
-                let pen = CreatePen(PS_SOLID, 1, if focused { p.sel_bg } else { p.border });
-                let (ob, op) = (SelectObject(wp as HDC, fill as HGDIOBJ), SelectObject(wp as HDC, pen as HGDIOBJ));
-                let e = app.s(8);
-                RoundRect(wp as HDC, fr.left, fr.top, fr.right, fr.bottom, e, e);
-                SelectObject(wp as HDC, ob);
-                SelectObject(wp as HDC, op);
-                DeleteObject(fill as HGDIOBJ);
-                DeleteObject(pen as HGDIOBJ);
+            let c = app.ctl.get();
+            for (fr, edit) in [(app.entry_frame.get(), c.entry), (app.filter_frame.get(), c.filter)] {
+                if fr.right > fr.left {
+                    let p = app.pal();
+                    let focused = GetFocus() == edit;
+                    let fill = CreateSolidBrush(p.field);
+                    let pen = CreatePen(PS_SOLID, 1, if focused { p.sel_bg } else { p.border });
+                    let (ob, op) = (SelectObject(wp as HDC, fill as HGDIOBJ), SelectObject(wp as HDC, pen as HGDIOBJ));
+                    let e = app.s(8);
+                    RoundRect(wp as HDC, fr.left, fr.top, fr.right, fr.bottom, e, e);
+                    SelectObject(wp as HDC, ob);
+                    SelectObject(wp as HDC, op);
+                    DeleteObject(fill as HGDIOBJ);
+                    DeleteObject(pen as HGDIOBJ);
+                }
             }
             1
         }
         WM_LBUTTONDOWN => {
             // a click in the frame but outside the edit still focuses the edit
             let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
-            let fr = app.entry_frame.get();
-            if x >= fr.left && x < fr.right && y >= fr.top && y < fr.bottom {
-                SetFocus(app.ctl.get().entry);
+            let c = app.ctl.get();
+            for (fr, edit) in [(app.entry_frame.get(), c.entry), (app.filter_frame.get(), c.filter)] {
+                if x >= fr.left && x < fr.right && y >= fr.top && y < fr.bottom {
+                    SetFocus(edit);
+                }
             }
             0
         }
         WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
             let p = app.pal();
-            SetTextColor(wp as HDC, p.fg);
+            SetTextColor(wp as HDC, if lp as HWND == app.ctl.get().fcount { p.sub_fg } else { p.fg });
             SetBkColor(wp as HDC, p.bg);
             app.brushes.get().bg as LRESULT
         }
@@ -1911,6 +2055,11 @@ pub unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         }
         WM_RELAYOUT => {
             app.apply_columns();
+            0
+        }
+        WM_TIMER if wp == TIMER_FILTER => {
+            KillTimer(hwnd, TIMER_FILTER);
+            app.render();
             0
         }
         WM_TIMER if wp == TIMER_PENCIL => {

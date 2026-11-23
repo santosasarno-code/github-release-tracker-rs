@@ -17,7 +17,9 @@ Berupa satu `.exe` kecil tanpa instalasi.
 - **Mark as seen** menghapus tanda setelah kamu selesai dengan pembaruan itu
 - Klik dua kali baris proyek (atau **Open release page**) untuk membuka halaman rilisnya; klik dua kali pada nama di kolom **Project** akan me-rename
 - **Ganti nama** proyek: klik ikon pensil yang muncul saat kursor di atas proyek, atau pilih lalu tekan **F2**, atau klik kanan > Rename, atau klik dua kali pada nama. *Reset name* mengembalikan nama dari GitHub
-- Klik header **Project**, **Repository**, **Published**, atau **Status** untuk mengurutkan (klik lagi untuk membalik)
+- Klik header **Project**, **Repository**, **Source**, **Published**, atau **Status** untuk mengurutkan (klik lagi untuk membalik)
+- Kolom **Source** menunjukkan asal tiap proyek (GitHub, GitLab, Codeberg, atau alamat server Anda sendiri); klik headernya untuk mengurutkan. Kotak pencarian juga mencocokkannya.
+- **Filter** daftar: ketik di kotak pencarian (Ctrl+F untuk pindah ke sana, Esc untuk mengosongkan) agar hanya proyek yang namanya atau repositorinya memuat semua kata yang diketik yang tampil, dan/atau pilih *Show:* All projects / Updates available / Errors / Up to date / No releases. Ini hanya mengubah tampilan; tidak ada yang dihapus atau disimpan berbeda. Kotak menampilkan "n of m".
 - **Import / Export** daftar sebagai `.json` (gabung atau ganti saat import; token tidak pernah diekspor)
 - Mode **terang / gelap**: klik ikon bulan / matahari di kanan bawah (awalnya mengikuti tema Windows)
 - Lebar kolom ikut proporsional saat jendela diubah ukurannya; seret batas kolom untuk mengubah proporsi
@@ -25,6 +27,46 @@ Berupa satu `.exe` kecil tanpa instalasi.
 - Portabel: satu `.exe`, tanpa installer, tanpa registry. Data berupa `projects.json` di sebelah exe (cadangan di `%APPDATA%\GitHubReleaseTracker` bila foldernya hanya-baca)
 
 Aplikasi hanya membaca informasi rilis. Tidak mengunduh atau memasang apa pun.
+
+## Keyboard dan mouse
+
+### Menambah dan memfilter
+| Aksi | Cara |
+|---|---|
+| Menambah proyek di kotak atas | **Enter**, atau tombol *Add project* |
+| Pindah ke kotak Filter | **Ctrl+F** |
+| Mengosongkan filter (teks dan status) | **Esc** di kotak Filter, atau tombol *Clear* |
+
+### Memilih proyek
+| Aksi | Cara |
+|---|---|
+| Pilih satu | Klik baris |
+| Tambah atau lepas satu baris dari pilihan | **Ctrl+klik** |
+| Pilih satu rentang | **Shift+klik**, atau **Shift+Atas / Bawah** |
+| Lompat ke proyek pertama / terakhir | **Home** / **End** |
+| Menggeser pilihan | **Atas / Bawah** |
+| Pilih semua proyek yang tampil | **Ctrl+A** |
+
+Hanya baris yang terlihat yang terpilih, jadi saat filter aktif, *Remove* dan *Mark as seen* hanya berlaku pada baris itu.
+
+### Mengelola proyek
+| Aksi | Cara |
+|---|---|
+| Ganti nama proyek terpilih | **F2**, atau klik dua kali pada nama di kolom **Project**, atau ikon pensil saat kursor di atas baris, atau klik kanan > Rename |
+| Simpan / batalkan ganti nama | **Enter** / **Esc** |
+| Membuka halaman rilis | Klik dua kali di kolom mana pun kecuali **Project**, atau *Open release page* |
+| Menghapus proyek terpilih | **Delete**, atau *Remove* (selalu bertanya dulu) |
+| Menu baris | **Klik kanan** baris: Open release page, Open repository, Mark as seen, Rename, Reset name, Include pre-releases, Remove. Klik kanan pada baris yang belum terpilih akan memilihnya dulu |
+
+### Daftar dan jendela
+| Aksi | Cara |
+|---|---|
+| Mengurutkan | Klik header **Project**, **Repository**, **Source**, **Published**, atau **Status**; klik lagi untuk membalik |
+| Mengubah lebar kolom | Seret garis pembatas di header |
+| Menggulir | Roda mouse |
+| Menyalin teks status | **Klik kanan** bar status > Copy |
+| Kotak teks | Klik kanan untuk Cut / Copy / Paste / Select all |
+| Beralih gelap / terang | Tombol bulan / matahari di kanan bawah |
 
 ## Yang kamu butuhkan
 
