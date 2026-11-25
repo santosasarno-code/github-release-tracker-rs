@@ -43,7 +43,7 @@ pub const ID_FCLEAR: i32 = 118;
 pub const ID_FCOUNT: i32 = 119;
 const TIMER_PENCIL: usize = 77;
 const TIMER_FILTER: usize = 78;
-const M_KIND: u32 = 300; // 301..=305 pick a status filter
+const M_KIND: u32 = 300; // 301..=306 pick a status filter
 const G_EDIT: u16 = 0xE70F;
 // popup menu ids
 const M_OPEN: u32 = 201;
@@ -53,6 +53,8 @@ const M_RENAME: u32 = 204;
 const M_RESET: u32 = 205;
 const M_PRE: u32 = 206;
 const M_REMOVE: u32 = 207;
+const M_CHECKSEL: u32 = 209;
+const M_FAV: u32 = 210;
 const M_COPY: u32 = 208;
 // private window messages
 const WM_JOB: u32 = WM_APP + 1;
@@ -151,7 +153,7 @@ struct Brushes {
 
 pub enum Job {
     Added(Result<(RepoInfo, Option<Release>), String>),
-    Checked { results: Vec<(String, Option<Release>, Option<String>)>, rate: Option<i64> },
+    Checked { results: Vec<(String, Option<Release>, Option<String>)>, rate: Option<i64>, limit: Option<String>, skipped: usize },
 }
 
 pub struct App {
@@ -333,11 +335,55 @@ impl App {
             let (mut ww, mut wh) = (rc.right - rc.left, rc.bottom - rc.top);
             ww = ww.min(sw - 40);
             wh = wh.min(sh - 80);
-            SetWindowPos(hwnd, null_mut(), ((sw - ww) / 2).max(0), ((sh - wh) / 3).max(0), ww, wh, SWP_NOZORDER);
-            ShowWindow(hwnd, SW_SHOWNORMAL);
+            let (mut px, mut py) = (((sw - ww) / 2).max(0), ((sh - wh) / 3).max(0));
+            let mut maximize = false;
+            let saved = self.data.borrow().settings.window;
+            if let Some(win) = saved {
+                // Last size / position / maximized state; a monitor that is gone drops the position.
+                let (mw, mh) = self.min_track();
+                let (fx, fy, fw, fh) = fit_window(&win, &monitor_areas(), mw, mh, dpi as f64 / 96.0);
+                ww = fw;
+                wh = fh;
+                if let (Some(x), Some(y)) = (fx, fy) {
+                    px = x;
+                    py = y;
+                }
+                maximize = win.maximized;
+            }
+            SetWindowPos(hwnd, null_mut(), px, py, ww, wh, SWP_NOZORDER);
+            ShowWindow(hwnd, if maximize { SW_SHOWMAXIMIZED } else { SW_SHOWNORMAL });
             UpdateWindow(hwnd);
             PostMessageW(hwnd, WM_STARTUP, 0, 0);
             true
+        }
+    }
+
+    /// Remember size, position and maximized state for the next start (called when the window closes).
+    fn save_window_state(&self) {
+        unsafe {
+            let mut wp: WINDOWPLACEMENT = std::mem::zeroed();
+            wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+            if GetWindowPlacement(self.hwnd.get(), &mut wp) == 0 {
+                return;
+            }
+            // rcNormalPosition is in work-area coordinates (the taskbar shifts the origin of the
+            // primary monitor); convert to screen coordinates.
+            let mut wa: RECT = std::mem::zeroed();
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa as *mut RECT as *mut std::ffi::c_void, 0);
+            let r = wp.rcNormalPosition;
+            let maximized = wp.showCmd == SW_SHOWMAXIMIZED as u32 || (wp.showCmd == SW_SHOWMINIMIZED as u32 && wp.flags & WPF_RESTORETOMAXIMIZED != 0);
+            let scale = self.dpi.get() as f64 / 96.0;
+            let ws = WindowState {
+                x: r.left + wa.left,
+                y: r.top + wa.top,
+                w: ((r.right - r.left) as f64 / scale).round() as i32,
+                h: ((r.bottom - r.top) as f64 / scale).round() as i32,
+                maximized,
+            };
+            if ws.w >= 100 && ws.h >= 100 && ws.x.abs() <= 100_000 && ws.y.abs() <= 100_000 {
+                self.data.borrow_mut().settings.window = Some(ws);
+                self.persist();
+            }
         }
     }
 
@@ -759,6 +805,9 @@ impl App {
             let cur = self.filter_kind.borrow().clone();
             for (i, (value, text)) in STATUS_FILTERS.iter().enumerate() {
                 AppendMenuW(menu, MF_STRING | if *value == cur { MF_CHECKED } else { 0 }, M_KIND as usize + i + 1, w(text).as_ptr());
+                if i == 0 {
+                    AppendMenuW(menu, MF_SEPARATOR, 0, null());
+                }
             }
             let mut rc: RECT = std::mem::zeroed();
             GetWindowRect(GetDlgItem(self.hwnd.get(), ID_FKIND), &mut rc);
@@ -810,7 +859,7 @@ impl App {
             None => return String::new(),
         };
         match col {
-            0 => display_name(p),
+            0 => star_name(p),
             1 => repo_path(p),
             2 => source_label(p),
             3 => release_label(p),
@@ -970,18 +1019,25 @@ impl App {
     }
 
     fn check_updates(&self) {
+        self.check_projects(false);
+    }
+
+    /// Check all projects, or only the selected ones.
+    fn check_projects(&self, only_selected: bool) {
         if self.busy.get() {
             return;
         }
+        let wanted = if only_selected { Some(self.selected_keys()) } else { None };
         let snapshot: Vec<(String, Option<String>, String, String, bool, String)> = self
             .data
             .borrow()
             .projects
             .iter()
+            .filter(|p| wanted.as_ref().map_or(true, |k| k.contains(&project_key(p))))
             .map(|p| (p.host.clone().unwrap_or_default(), p.kind.clone(), p.owner.clone(), p.repo.clone(), p.include_prereleases, project_key(p)))
             .collect();
         if snapshot.is_empty() {
-            self.set_status("Nothing to check - add a project first.");
+            self.set_status(if only_selected { "Select one or more projects first." } else { "Nothing to check - add a project first." });
             return;
         }
         let token = self.token();
@@ -990,17 +1046,20 @@ impl App {
         let target = self.hwnd.get() as usize;
         std::thread::spawn(move || {
             let mut results = Vec::new();
+            let mut limit = None;
+            let total = snapshot.len();
             for (host, kind, owner, repo, inc, key) in snapshot {
                 match fetch_latest_for(&*net, &host, kind.as_deref(), &owner, &repo, &token, inc) {
                     Ok(r) => results.push((key, r, None)),
                     Err(GitHubError::RateLimit(m)) => {
-                        results.push((key, None, Some(m)));
+                        limit = Some(m); // a limit for the whole run, not an error of this project
                         break; // no point continuing
                     }
                     Err(e) => results.push((key, None, Some(e.to_string()))),
                 }
             }
-            post_job(target, Job::Checked { results, rate: net.rate_remaining() });
+            let skipped = total - results.len();
+            post_job(target, Job::Checked { results, rate: net.rate_remaining(), limit, skipped });
         });
     }
 
@@ -1023,6 +1082,7 @@ impl App {
                     last_checked: now_iso(),
                     error: None,
                     custom_name: None,
+                    favorite: false,
                 };
                 // keep the same cleaning as imports (long titles etc.)
                 if let Some(n) = normalize_project(&serde_json::to_value(&p).unwrap_or_default()) {
@@ -1046,7 +1106,7 @@ impl App {
                 }
                 self.set_status(&msg);
             }
-            Job::Checked { results, rate } => {
+            Job::Checked { results, rate, limit, skipped } => {
                 let now = now_iso();
                 let mut errors = 0;
                 {
@@ -1062,6 +1122,11 @@ impl App {
                 }
                 self.persist();
                 self.render();
+                if let Some(m) = limit {
+                    // unchecked projects keep their previous state
+                    self.set_status(&format!("{} {} project(s) not checked.", m, skipped));
+                    return;
+                }
                 let updates = self.data.borrow().projects.iter().filter(|p| has_update(p)).count();
                 let mut msg = format!("Checked {} project(s): {} update(s) available", results.len(), updates);
                 if errors > 0 {
@@ -1117,6 +1182,23 @@ impl App {
         if let Some(p) = self.first_selected() {
             shell_open(&safe_url(Some(&p.html_url), &project_base(&p), &repo_page(&p)));
         }
+    }
+
+    fn toggle_favorite(&self) {
+        if self.selected_keys().is_empty() {
+            self.set_status("Select one or more projects first.");
+            return;
+        }
+        let (add, n) = self.with_selected(|sel| {
+            let add = !sel.iter().all(|p| p.favorite);
+            for p in sel.iter_mut() {
+                p.favorite = add;
+            }
+            (add, sel.len())
+        });
+        self.persist();
+        self.render();
+        self.set_status(&format!("{} {} project(s) {} favorites.", if add { "Added" } else { "Removed" }, n, if add { "to" } else { "from" }));
     }
 
     fn toggle_prerelease(&self) {
@@ -1273,7 +1355,7 @@ impl App {
 
     fn popup_menu(&self, x: i32, y: i32) {
         unsafe {
-            let sel = self.with_selected(|s| s.iter().map(|p| (p.include_prereleases, p.custom_name.is_some())).collect::<Vec<_>>());
+            let sel = self.with_selected(|s| s.iter().map(|p| (p.include_prereleases, p.custom_name.is_some(), p.favorite)).collect::<Vec<_>>());
             if sel.is_empty() {
                 return;
             }
@@ -1283,7 +1365,10 @@ impl App {
             };
             add(M_OPEN, "Open release page", 0);
             add(M_REPO, "Open repository", 0);
+            add(M_CHECKSEL, "Check selected", 0);
             add(M_SEEN, "Mark as seen", 0);
+            AppendMenuW(menu, MF_SEPARATOR, 0, null());
+            add(M_FAV, if sel.iter().all(|s| s.2) { "Remove from favorites" } else { "Add to favorites" }, 0);
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
             add(M_RENAME, "Rename...\tF2", if sel.len() == 1 { 0 } else { MF_GRAYED });
             add(M_RESET, "Reset name", if sel.iter().any(|s| s.1) { 0 } else { MF_GRAYED });
@@ -1301,6 +1386,8 @@ impl App {
             M_OPEN => self.open_release(),
             M_REPO => self.open_repo(),
             M_SEEN => self.mark_seen(),
+            M_CHECKSEL => self.check_projects(true),
+            M_FAV => self.toggle_favorite(),
             M_RENAME => self.rename_selected(),
             M_RESET => self.reset_names(),
             M_PRE => self.toggle_prerelease(),
@@ -1770,10 +1857,17 @@ impl App {
                 let di = &*(nm as *const NMLVDISPINFOW);
                 let edit = SendMessageW(c.list, LVM_GETEDITCONTROL, 0, 0) as HWND;
                 if !edit.is_null() {
+                    // The cell shows a star for favorites; the box must hold the plain name.
+                    let raw = {
+                        let (data, view) = (self.data.borrow(), self.view.borrow());
+                        view.get(di.item.iItem as usize).and_then(|&i| data.projects.get(i)).map(display_name)
+                    };
+                    if let Some(raw) = raw {
+                        SetWindowTextW(edit, w(&raw).as_ptr());
+                    }
                     SendMessageW(edit, EM_SETLIMIT, MAX_CUSTOM_NAME * 2, 0);
                     SendMessageW(edit, EM_SETSEL, 0, -1);
                 }
-                let _ = di;
                 0
             }
             LVN_ENDLABELEDIT => {
@@ -2081,6 +2175,7 @@ pub unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             0
         }
         WM_CLOSE => {
+            app.save_window_state();
             DestroyWindow(hwnd);
             0
         }
@@ -2090,6 +2185,30 @@ pub unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
+}
+
+unsafe extern "system" fn monitor_cb(hmon: HMONITOR, _hdc: HDC, _rc: *mut RECT, lp: LPARAM) -> i32 {
+    let out = &mut *(lp as *mut Vec<(i32, i32, i32, i32)>);
+    let mut mi: MONITORINFO = std::mem::zeroed();
+    mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if GetMonitorInfoW(hmon, &mut mi) != 0 {
+        let r = mi.rcWork;
+        if mi.dwFlags & MONITORINFOF_PRIMARY != 0 {
+            out.insert(0, (r.left, r.top, r.right, r.bottom));
+        } else {
+            out.push((r.left, r.top, r.right, r.bottom));
+        }
+    }
+    1
+}
+
+/// Work areas of all monitors (left, top, right, bottom); the primary monitor comes first.
+fn monitor_areas() -> Vec<(i32, i32, i32, i32)> {
+    let mut v: Vec<(i32, i32, i32, i32)> = Vec::new();
+    unsafe {
+        EnumDisplayMonitors(null_mut(), null(), Some(monitor_cb), &mut v as *mut Vec<(i32, i32, i32, i32)> as LPARAM);
+    }
+    v
 }
 
 /// Subclass of the list view: tells the app where the mouse is (hover pencil) and hides the pencil

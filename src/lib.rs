@@ -36,7 +36,17 @@ impl GitHubError {
     pub fn not_found() -> Self {
         GitHubError::NotFound("Not found (wrong name, or a private repository).".into())
     }
+    /// What a check says when a project that was added earlier can no longer be found.
+    pub fn not_found_check() -> Self {
+        GitHubError::NotFound(NOT_FOUND_CHECK.into())
+    }
+    /// Short text for a 5xx answer (also the 52x codes Cloudflare uses).
+    pub fn server_down(code: u32) -> Self {
+        GitHubError::Other(format!("Server down (HTTP {}). Try later.", code))
+    }
 }
+
+pub const NOT_FOUND_CHECK: &str = "Not found (deleted or private).";
 
 impl fmt::Display for GitHubError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -105,6 +115,64 @@ pub struct Project {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_name: Option<String>,
+    /// Starred by the user. Only written when true.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub favorite: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Window size, position and maximized state, restored on the next start. Size is in logical
+/// units (100% scaling); x / y are screen pixels (virtual desktop, may be negative).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct WindowState {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub maximized: bool,
+}
+
+const MAX_COORD: i64 = 100_000;
+
+/// A clean WindowState from untrusted JSON, or None.
+pub fn normalize_window(raw: Option<&Value>) -> Option<WindowState> {
+    let o = raw?.as_object()?;
+    let num = |k: &str| -> Option<i32> {
+        let n = o.get(k)?.as_i64()?;
+        if n.abs() > MAX_COORD { None } else { Some(n as i32) }
+    };
+    let (x, y, w, h) = (num("x")?, num("y")?, num("w")?, num("h")?);
+    if w < 100 || h < 100 {
+        return None;
+    }
+    Some(WindowState { x, y, w, h, maximized: o.get("maximized") == Some(&Value::Bool(true)) })
+}
+
+/// Where to open the window: (x, y, w, h) in pixels; x / y are None for "use the default place".
+/// `monitors` are work areas (left, top, right, bottom). The title bar must overlap a monitor by at
+/// least 100 x 30 pixels (scaled), else the saved position is dropped (monitor unplugged, resolution
+/// changed) and only the size is kept. Size never goes below the minimum or above the monitor.
+pub fn fit_window(win: &WindowState, monitors: &[(i32, i32, i32, i32)], min_w: i32, min_h: i32, scale: f64) -> (Option<i32>, Option<i32>, i32, i32) {
+    let w = ((win.w as f64 * scale).round() as i32).max(min_w);
+    let h = ((win.h as f64 * scale).round() as i32).max(min_h);
+    if monitors.is_empty() {
+        return (None, None, w, h);
+    }
+    let need_w = (100.0 * scale) as i32;
+    let need_h = (30.0 * scale) as i32;
+    let (x, y) = (win.x, win.y);
+    for &(l, t, r, b) in monitors {
+        let ow = (x + w).min(r) - x.max(l);
+        let oh = (y + need_h).min(b) - y.max(t);
+        if ow >= need_w.min(w) && oh >= need_h / 2 {
+            return (Some(x), Some(y), w.min((r - l).max(min_w)), h.min((b - t).max(min_h)));
+        }
+    }
+    let (l, t, r, b) = monitors[0];
+    (None, None, w.min((r - l).max(min_w)), h.min((b - t).max(min_h)))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -114,11 +182,13 @@ pub struct Settings {
     pub theme: String, // "light" | "dark" | ""
     pub sort_col: String,
     pub sort_asc: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowState>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { token: String::new(), check_on_launch: false, theme: String::new(), sort_col: String::new(), sort_asc: true }
+        Settings { token: String::new(), check_on_launch: false, theme: String::new(), sort_col: String::new(), sort_asc: true, window: None }
     }
 }
 
@@ -393,8 +463,9 @@ pub fn status_kind(p: &Project) -> &'static str {
 }
 
 /// Choices of the status filter: (value, menu text). "all" shows everything.
-pub const STATUS_FILTERS: [(&str, &str); 5] = [
+pub const STATUS_FILTERS: [(&str, &str); 6] = [
     ("all", "All projects"),
+    ("favorite", "\u{2605} Favorites"),
     ("update", "Updates available"),
     ("error", "Errors"),
     ("ok", "Up to date"),
@@ -415,7 +486,11 @@ pub fn filter_matches(projects: &[Project], query: &str, kind: &str) -> Vec<bool
     projects
         .iter()
         .map(|p| {
-            if kind != "all" && status_kind(p) != kind {
+            if kind == "favorite" {
+                if !p.favorite {
+                    return false;
+                }
+            } else if kind != "all" && status_kind(p) != kind {
                 return false;
             }
             if terms.is_empty() {
@@ -425,6 +500,11 @@ pub fn filter_matches(projects: &[Project], query: &str, kind: &str) -> Vec<bool
             terms.iter().all(|t| hay.contains(t.as_str()))
         })
         .collect()
+}
+
+/// Project column text: a star in front of favorites. Display only; never sorted or searched.
+pub fn star_name(p: &Project) -> String {
+    if p.favorite { format!("\u{2605} {}", display_name(p)) } else { display_name(p) }
 }
 
 /// Text of the "Current release" cell.
@@ -577,6 +657,7 @@ pub fn normalize_project(raw: &Value) -> Option<Project> {
         last_checked: str_field(o.get("last_checked"), 40),
         error: if error.is_empty() { None } else { Some(error) },
         custom_name: if custom.is_empty() { None } else { Some(custom) },
+        favorite: o.get("favorite") == Some(&Value::Bool(true)),
     };
     let base = project_base(&p);
     p.html_url = safe_url(o.get("html_url").and_then(|u| u.as_str()), &base, &repo_page(&p));
@@ -647,6 +728,7 @@ pub fn parse_data(text: &str) -> Option<Data> {
             _ => String::new(),
         };
         data.settings.sort_asc = s.get("sort_asc") != Some(&Value::Bool(false));
+        data.settings.window = normalize_window(s.get("window"));
     }
     data.projects = parse_import(&v).map(|(p, _)| p).unwrap_or_default();
     Some(data)
@@ -763,7 +845,9 @@ pub fn fetch_repo_info(net: &dyn Net, owner: &str, repo: &str, token: &str) -> R
 fn newest_release(net: &dyn Net, owner: &str, repo: &str, token: &str) -> Result<Option<Release>, GitHubError> {
     let data = match net.api_get(&format!("/repos/{}/{}/releases?per_page=10", owner, repo), token) {
         Ok(d) => d,
-        Err(GitHubError::NotFound(_)) => return Ok(None),
+        // An existing repository without releases answers 200 with an empty list; a 404 here
+        // means the repository itself is gone (or private), so do not hide it.
+        Err(GitHubError::NotFound(_)) => return Err(GitHubError::not_found_check()),
         Err(e) => return Err(e),
     };
     for r in data.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
@@ -777,7 +861,7 @@ fn newest_release(net: &dyn Net, owner: &str, repo: &str, token: &str) -> Result
 fn newest_tag(net: &dyn Net, owner: &str, repo: &str, token: &str) -> Result<Option<Release>, GitHubError> {
     let data = match net.api_get(&format!("/repos/{}/{}/tags?per_page=1", owner, repo), token) {
         Ok(d) => d,
-        Err(GitHubError::NotFound(_)) => return Ok(None),
+        Err(GitHubError::NotFound(_)) => return Err(GitHubError::not_found_check()),
         Err(e) => return Err(e),
     };
     let t = match data.as_array().and_then(|a| a.first()) {
@@ -1200,10 +1284,15 @@ pub fn resolve_project(net: &dyn Net, host: &str, kind: Option<&str>, segs: &[St
 
 /// Latest release for a GitHub project (host "") or one on another host.
 pub fn fetch_latest_for(net: &dyn Net, host: &str, kind: Option<&str>, owner: &str, repo: &str, token: &str, include_pre: bool) -> Result<Option<Release>, GitHubError> {
-    if host.is_empty() {
-        return get_latest(net, owner, repo, token, include_pre);
+    let r = if host.is_empty() {
+        get_latest(net, owner, repo, token, include_pre)
+    } else {
+        fetch_latest_host(net, host, kind.unwrap_or("gitea"), owner, repo, include_pre)
+    };
+    match r {
+        Err(GitHubError::NotFound(_)) => Err(GitHubError::not_found_check()),
+        other => other,
     }
-    fetch_latest_host(net, host, kind.unwrap_or("gitea"), owner, repo, include_pre)
 }
 
 // ---------------------------------------------------------------------------

@@ -19,7 +19,12 @@ It ships as one small `.exe` with nothing to install.
 - **Rename** a project: click the pencil that appears when you hover it, or select it and press **F2**, or right-click > Rename, or double-click the name. *Reset name* brings the GitHub name back
 - Click the **Project**, **Repository**, **Source**, **Published** or **Status** header to sort (click again to reverse)
 - The **Source** column tells where each project lives (GitHub, GitLab, Codeberg, or your own server's address); click its header to sort by it. The search box matches it too.
-- **Filter** the list: type in the search box (Ctrl+F jumps there, Esc clears it) to show only projects whose name or repository contains every word you typed, and/or pick *Show:* All projects / Updates available / Errors / Up to date / No releases. It only changes what is listed; nothing is removed or saved differently. The box shows "n of m".
+- **Filter** the list: type in the search box (Ctrl+F jumps there, Esc clears it) to show only projects whose name or repository contains every word you typed, and/or pick *Show:* All projects / ★ Favorites / Updates available / Errors / Up to date / No releases. It only changes what is listed; nothing is removed or saved differently. The box shows "n of m".
+- **Favorites**: right-click > *Add to favorites* (works on several selected rows; *Remove from favorites* when all selected already are). Favorites show a ★ before the name; the star is only drawn, so renaming, sorting and searching use the plain name. Show only them with *Show:* ★ Favorites.
+- **Check selected** (right-click): re-check only the selected projects. *Check for updates* still checks all.
+- A project whose repository was **deleted or made private** shows a red *Not found (deleted or private)* error, keeps its last known release, and recovers by itself when the repository is back. A server that is down shows *Server down (HTTP 5xx). Try later.*
+- When the **GitHub rate limit** is reached the run stops, no single project is marked as an error, and the status bar says how many projects were not checked and when the limit resets. Add a token in Settings for a higher limit.
+- The window **remembers its size, position (also which monitor) and maximized state**. If that monitor is gone it opens on the main one. To reset it, close the app and delete the `"window"` entry under `"settings"` in `projects.json`.
 - **Import / Export** the list as `.json` (merge or replace on import; the token is never exported)
 - **Light / dark** mode: click the moon / sun icon at the bottom right (starts with your Windows theme)
 - Columns resize in proportion when you resize the window; drag a column border to change the proportions
@@ -56,7 +61,7 @@ Only the rows you can see are selected, so with a filter on, *Remove* and *Mark 
 | Save / cancel a rename | **Enter** / **Esc** |
 | Open the release page | Double-click any column except **Project**, or *Open release page* |
 | Remove the selected projects | **Delete**, or *Remove* (always asks first) |
-| Row menu | **Right-click** a row: Open release page, Open repository, Mark as seen, Rename, Reset name, Include pre-releases, Remove. Right-clicking a row that is not selected selects it first |
+| Row menu | **Right-click** a row: Open release page, Open repository, Check selected, Mark as seen, Add to favorites, Rename, Reset name, Include pre-releases, Remove. Right-clicking a row that is not selected selects it first |
 
 ### The list and window
 | Action | How |

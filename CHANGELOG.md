@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.4.0] - 2026-11-25
+- **Favorites.** Right-click > *Add to favorites* / *Remove from favorites*. Favorites show a ★ before the name (display only: renaming, sorting and search use the plain name). New *Show:* item **★ Favorites** (after *All projects*); the search box still narrows it. Saved as `"favorite": true` in `projects.json`, only for starred projects.
+- **Check selected** in the right-click menu re-checks only the selected projects.
+- **Deleted or private repositories** now show a red *Not found (deleted or private)* error instead of "No releases published". The last known release is kept, the row appears under *Show:* Errors, and it recovers by itself when the repository is back.
+- **Server errors** (HTTP 5xx, including Cloudflare 52x) show *Server down (HTTP 521). Try later.* for GitHub and other hosts.
+- **Rate limit:** the run stops once, no single project is marked as an error, and the status bar says how many projects were not checked and when the limit resets. Unchecked projects keep their previous state.
+- **The window remembers its size, position (also which monitor) and maximized state.** Size is stored independent of display scale; if the saved monitor is gone, the window opens on the main one; the minimum size still applies. Reset: delete the `"window"` entry under `"settings"` in `projects.json`. Older versions drop that entry when they save.
+- Older versions ignore and drop the `favorite` flag when they save `projects.json`.
+- Not tested on real Windows when this was written: monitor changes and maximize/restore, the ★ in the list, the Show menu separator. The logic (window placement rules, favorites, not-found and rate-limit handling) is covered by unit tests.
+
 ## [2.3.0] - 2026-11-22
 - New **Source** column after Repository: GitHub, GitLab, Codeberg, or the address of your own server. Click the header to sort (GitHub, GitLab, Codeberg, then other servers A-Z; names A-Z inside each group). The search box matches the source too (type `gitlab`).
 - The **Repository** column now shows `owner/repo` only; the host moved to Source. It sorts by what it shows. The **Project** column is unchanged.

@@ -151,6 +151,7 @@ impl Net for WinHttpNet {
             }
             404 => Err(GitHubError::not_found()),
             401 => Err(GitHubError::Other("GitHub rejected the token (401). Check it in Settings.".into())),
+            s if s >= 500 => Err(GitHubError::server_down(s)),
             s => Err(GitHubError::Other(format!("GitHub returned HTTP {}.", s))),
         }
     }
@@ -162,6 +163,7 @@ impl Net for WinHttpNet {
             200..=299 => Ok(String::from_utf8_lossy(&r.body).into_owned()),
             404 => Err(GitHubError::not_found()),
             429 => Err(GitHubError::Other("GitHub is rate-limiting the release feed (429). Try again later.".into())),
+            s if s >= 500 => Err(GitHubError::server_down(s)),
             s => Err(GitHubError::Other(format!("Release feed returned HTTP {}.", s))),
         }
     }
@@ -178,6 +180,7 @@ impl Net for WinHttpNet {
                 r.status
             ))),
             429 => Err(GitHubError::Other("The server is rate-limiting requests (429). Try again later.".into())),
+            s if s >= 500 => Err(GitHubError::server_down(s)),
             s => Err(GitHubError::Other(format!("The server returned HTTP {}.", s))),
         }
     }

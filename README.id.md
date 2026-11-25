@@ -19,7 +19,12 @@ Berupa satu `.exe` kecil tanpa instalasi.
 - **Ganti nama** proyek: klik ikon pensil yang muncul saat kursor di atas proyek, atau pilih lalu tekan **F2**, atau klik kanan > Rename, atau klik dua kali pada nama. *Reset name* mengembalikan nama dari GitHub
 - Klik header **Project**, **Repository**, **Source**, **Published**, atau **Status** untuk mengurutkan (klik lagi untuk membalik)
 - Kolom **Source** menunjukkan asal tiap proyek (GitHub, GitLab, Codeberg, atau alamat server Anda sendiri); klik headernya untuk mengurutkan. Kotak pencarian juga mencocokkannya.
-- **Filter** daftar: ketik di kotak pencarian (Ctrl+F untuk pindah ke sana, Esc untuk mengosongkan) agar hanya proyek yang namanya atau repositorinya memuat semua kata yang diketik yang tampil, dan/atau pilih *Show:* All projects / Updates available / Errors / Up to date / No releases. Ini hanya mengubah tampilan; tidak ada yang dihapus atau disimpan berbeda. Kotak menampilkan "n of m".
+- **Filter** daftar: ketik di kotak pencarian (Ctrl+F untuk pindah ke sana, Esc untuk mengosongkan) agar hanya proyek yang namanya atau repositorinya memuat semua kata yang diketik yang tampil, dan/atau pilih *Show:* All projects / ★ Favorites / Updates available / Errors / Up to date / No releases. Ini hanya mengubah tampilan; tidak ada yang dihapus atau disimpan berbeda. Kotak menampilkan "n of m".
+- **Favorit**: klik kanan > *Add to favorites* (bisa untuk beberapa baris terpilih; menjadi *Remove from favorites* jika semua yang dipilih sudah favorit). Favorit diberi ★ sebelum nama; bintang hanya tampilan, jadi ganti nama, pengurutan, dan pencarian memakai nama biasa. Tampilkan hanya favorit lewat *Show:* ★ Favorites.
+- **Check selected** (klik kanan): cek ulang hanya proyek yang dipilih. *Check for updates* tetap mengecek semuanya.
+- Proyek yang repositorinya **dihapus atau dijadikan private** menampilkan error merah *Not found (deleted or private)*, rilis terakhir tetap tersimpan, dan pulih sendiri jika repositorinya kembali. Server yang sedang down menampilkan *Server down (HTTP 5xx). Try later.*
+- Saat **batas API GitHub** tercapai, pengecekan berhenti, tidak ada proyek yang ditandai error, dan bar status menyebut berapa proyek yang belum dicek serta kapan batas direset. Isi token di Settings untuk batas lebih tinggi.
+- Jendela **mengingat ukuran, posisi (termasuk monitor) dan status maximize**. Jika monitor itu sudah tidak ada, jendela dibuka di monitor utama. Untuk mereset, tutup aplikasi lalu hapus entri `"window"` di bawah `"settings"` pada `projects.json`.
 - **Import / Export** daftar sebagai `.json` (gabung atau ganti saat import; token tidak pernah diekspor)
 - Mode **terang / gelap**: klik ikon bulan / matahari di kanan bawah (awalnya mengikuti tema Windows)
 - Lebar kolom ikut proporsional saat jendela diubah ukurannya; seret batas kolom untuk mengubah proporsi
@@ -56,7 +61,7 @@ Hanya baris yang terlihat yang terpilih, jadi saat filter aktif, *Remove* dan *M
 | Simpan / batalkan ganti nama | **Enter** / **Esc** |
 | Membuka halaman rilis | Klik dua kali di kolom mana pun kecuali **Project**, atau *Open release page* |
 | Menghapus proyek terpilih | **Delete**, atau *Remove* (selalu bertanya dulu) |
-| Menu baris | **Klik kanan** baris: Open release page, Open repository, Mark as seen, Rename, Reset name, Include pre-releases, Remove. Klik kanan pada baris yang belum terpilih akan memilihnya dulu |
+| Menu baris | **Klik kanan** baris: Open release page, Open repository, Check selected, Mark as seen, Add to favorites, Rename, Reset name, Include pre-releases, Remove. Klik kanan pada baris yang belum terpilih akan memilihnya dulu |
 
 ### Daftar dan jendela
 | Aksi | Cara |

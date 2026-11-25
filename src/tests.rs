@@ -134,12 +134,15 @@ fn get_latest_falls_back_to_api_then_tags() {
     let r = get_latest(&net, "o", "r", "", true).unwrap().unwrap();
     assert_eq!((r.id.clone(), r.tag.as_str(), r.prerelease, r.source.as_str()), (Id::Int(7), "v9", true, "release"));
     // nothing but tags
-    let net = MockNet::new(Ok("<feed></feed>".into())).on("/repos/o/r/tags", Ok(json!([{"name": "v0/1", "commit": {"sha": "abc"}}])));
+    let net = MockNet::new(Ok("<feed></feed>".into())).on("/repos/o/r/releases?", Ok(json!([]))).on("/repos/o/r/tags", Ok(json!([{"name": "v0/1", "commit": {"sha": "abc"}}])));
     let r = get_latest(&net, "o", "r", "", true).unwrap().unwrap();
     assert_eq!((r.source.as_str(), r.id.clone(), r.url.as_str()), ("tag", Id::Str("abc".into()), "https://github.com/o/r/releases/tag/v0%2F1"));
-    // nothing at all
-    let net = MockNet::new(Ok("<feed></feed>".into()));
+    // an existing repository without releases or tags: the API answers 200 with empty lists
+    let net = MockNet::new(Ok("<feed></feed>".into())).on("/repos/o/r/releases?", Ok(json!([]))).on("/repos/o/r/tags", Ok(json!([])));
     assert_eq!(get_latest(&net, "o", "r", "", true), Ok(None));
+    // a missing repository: every endpoint answers 404 -> an error, not "no releases"
+    let net = MockNet::new(Ok("<feed></feed>".into()));
+    assert_eq!(get_latest(&net, "o", "r", "", true), Err(GitHubError::not_found_check()));
 }
 
 #[test]
@@ -591,5 +594,99 @@ mod source_tests {
     fn unknown_saved_sort_column_falls_back() {
         let d = parse_data(r#"{"settings":{"sort_col":"bogus"},"projects":[]}"#).unwrap();
         assert_eq!(d.settings.sort_col, "");
+    }
+}
+
+mod v24_tests {
+    use super::*;
+
+    #[test]
+    fn missing_repo_and_server_errors() {
+        for inc in [true, false] {
+            let net = MockNet::new(Err(GitHubError::not_found()));
+            assert_eq!(fetch_latest_for(&net, "", None, "o", "r", "", inc), Err(GitHubError::NotFound(NOT_FOUND_CHECK.into())));
+            let net = MockNet::new(Err(GitHubError::not_found())).on("/repos/o/r/releases?", Ok(json!([]))).on("/repos/o/r/tags", Ok(json!([])));
+            assert_eq!(fetch_latest_for(&net, "", None, "o", "r", "", inc), Ok(None));
+        }
+        // another host: a 404 is reported the same way
+        let net = MockNet::new(Ok(String::new()));
+        assert_eq!(fetch_latest_for(&net, "codeberg.org", Some("gitea"), "o", "r", "", true), Err(GitHubError::not_found_check()));
+        assert_eq!(GitHubError::server_down(521).to_string(), "Server down (HTTP 521). Try later.");
+        // a failed check keeps the last known release and recovers later
+        let mut p = proj("o", "r");
+        p.fmt = Some(2);
+        p.latest = Some(rel(1, "v1", "2026-01-01"));
+        p.seen_id = Some(Id::Int(1));
+        apply_result(&mut p, None, Some(NOT_FOUND_CHECK.into()), "t1");
+        assert_eq!(p.latest.as_ref().unwrap().tag, "v1");
+        assert_eq!(status_kind(&p), "error");
+        let keep = p.latest.clone();
+        apply_result(&mut p, keep, None, "t2");
+        assert_eq!(status_kind(&p), "ok");
+    }
+
+    #[test]
+    fn favorites() {
+        let mut p = proj("a", "b");
+        assert!(!p.favorite);
+        assert!(!serde_json::to_string(&p).unwrap().contains("favorite"));
+        p.favorite = true;
+        p.custom_name = Some("Foo".into());
+        assert_eq!(star_name(&p), "\u{2605} Foo");
+        assert_eq!(display_name(&p), "Foo");
+        assert!(serde_json::to_string(&p).unwrap().contains("\"favorite\":true"));
+        let q = proj("c", "d");
+        let both = vec![p.clone(), q.clone()];
+        assert_eq!(filter_matches(&both, "", "favorite"), vec![true, false]);
+        assert_eq!(filter_matches(&both, "\u{2605}", "all"), vec![false, false]); // the star is not searchable
+        assert_eq!(filter_matches(&both, "foo", "favorite"), vec![true, false]);
+        assert_eq!(filter_matches(&both, "d", "favorite"), vec![false, false]);
+        assert_eq!(STATUS_FILTERS[0].0, "all");
+        assert_eq!(STATUS_FILTERS[1].0, "favorite");
+        // import / load: only a real `true` counts
+        for (v, want) in [(json!(true), true), (json!(false), false), (json!("yes"), false), (json!(1), false)] {
+            let n = normalize_project(&json!({"owner": "a", "repo": "b", "favorite": v})).unwrap();
+            assert_eq!(n.favorite, want);
+        }
+    }
+
+    #[test]
+    fn window_validation() {
+        let mon2 = [(0, 0, 1920, 1040), (1920, 0, 3840, 1040)];
+        let w = WindowState { x: 2000, y: 100, w: 1200, h: 600, maximized: true };
+        assert_eq!(fit_window(&w, &mon2, 700, 340, 1.0), (Some(2000), Some(100), 1200, 600));
+        // second monitor unplugged: position dropped, size kept
+        assert_eq!(fit_window(&w, &mon2[..1], 700, 340, 1.0), (None, None, 1200, 600));
+        let at = |x, y, ww, hh| WindowState { x, y, w: ww, h: hh, maximized: false };
+        assert_eq!(fit_window(&at(100, 1030, 800, 500), &mon2[..1], 700, 340, 1.0).0, None); // title bar off the bottom
+        assert_eq!(fit_window(&at(100, 900, 800, 500), &mon2[..1], 700, 340, 1.0).0, Some(100)); // body hangs off, title bar visible
+        assert_eq!(fit_window(&at(1900, 100, 800, 500), &mon2[..1], 700, 340, 1.0).0, None); // 20 px sliver
+        let r = fit_window(&at(0, 0, 300, 200), &mon2, 700, 340, 1.0);
+        assert_eq!((r.2, r.3), (700, 340));
+        let r = fit_window(&at(0, 0, 9000, 9000), &mon2, 700, 340, 1.0);
+        assert_eq!((r.2, r.3), (1920, 1040));
+        let r = fit_window(&at(0, 0, 1200, 600), &mon2, 700, 340, 1.5);
+        assert_eq!((r.2, r.3), (1800, 900));
+        let left = [(0, 0, 1920, 1040), (-1920, 0, 0, 1040)];
+        assert_eq!(fit_window(&at(-1500, 50, 800, 500), &left, 700, 340, 1.0).0, Some(-1500));
+        assert_eq!(fit_window(&w, &[], 700, 340, 1.0).0, None);
+        // untrusted input
+        assert_eq!(normalize_window(Some(&json!({"x": 1, "y": 2, "w": 500, "h": 400}))), Some(WindowState { x: 1, y: 2, w: 500, h: 400, maximized: false }));
+        assert_eq!(normalize_window(Some(&json!({"x": "a", "y": 2, "w": 500, "h": 400}))), None);
+        assert_eq!(normalize_window(Some(&json!({"x": 1, "y": 2, "w": 10, "h": 400}))), None);
+        assert_eq!(normalize_window(Some(&json!({"x": 10_000_000_000i64, "y": 2, "w": 500, "h": 400}))), None);
+        assert_eq!(normalize_window(Some(&json!([1]))), None);
+        assert_eq!(normalize_window(None), None);
+    }
+
+    #[test]
+    fn window_round_trip_in_settings() {
+        let mut d = Data::default();
+        d.settings.window = Some(WindowState { x: -5, y: 7, w: 1200, h: 600, maximized: true });
+        let text = data_to_json(&d);
+        assert_eq!(parse_data(&text).unwrap().settings.window, d.settings.window);
+        assert!(!data_to_json(&Data::default()).contains("window"));
+        let bad = text.replace("\"x\": -5", "\"x\": \"no\"");
+        assert_eq!(parse_data(&bad).unwrap().settings.window, None);
     }
 }
